@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: DiGress
+Version: 1.0.1
+Summary: Discrete denoising diffusion for graph generation
+Author: C.V., I.K., A.S.
+Author-email: author@gmail.com
+License-File: LICENSE
