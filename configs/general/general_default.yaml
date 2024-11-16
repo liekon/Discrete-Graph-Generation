@@ -1,5 +1,5 @@
 # General settings
-name: 'graph-tf-model-qm9-discrete-nodeedgetogether-marginalp-nodechange-extranodeloss1-xTnodemarginal'      # Warning: 'debug' and 'test' are reserved name that have a special behavior
+name: 'graph-tf-model-qm9-VALIDSUBGRAPH-discrete-nodeedgetogether-marginalp-nodeedgechange-extranodeedgeloss1-xTnodemarginal-nodeselect0.1'      # Warning: 'debug' and 'test' are reserved name that have a special behavior
 
 wandb: 'online'             # online | offline | disabled
 gpus: 1                     # Multi-gpu is not implemented on this branch

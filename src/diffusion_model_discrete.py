@@ -5,12 +5,14 @@ import pytorch_lightning as pl
 import time
 import wandb
 import os
-
+import math
 from models.transformer_model import GraphTransformer
 from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
     MarginalUniformTransition
 from src.diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
+from metrics.val_metrics import ValLossDiscrete
+from metrics.test_metrics import TestLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
 from src import utils
 
@@ -24,7 +26,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         output_dims = dataset_infos.output_dims
         nodes_dist = dataset_infos.nodes_dist
 
-        #input_dims['y'] += 1 #change
+        input_dims['y'] += 1 #change
 
         self.cfg = cfg
         self.name = cfg.general.name
@@ -42,18 +44,8 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.dataset_info = dataset_infos
 
         self.train_loss = TrainLossDiscrete(self.cfg.model.lambda_train)
-
-        self.val_nll = NLL()
-        self.val_X_kl = SumExceptBatchKL()
-        self.val_E_kl = SumExceptBatchKL()
-        self.val_X_logp = SumExceptBatchMetric()
-        self.val_E_logp = SumExceptBatchMetric()
-
-        self.test_nll = NLL()
-        self.test_X_kl = SumExceptBatchKL()
-        self.test_E_kl = SumExceptBatchKL()
-        self.test_X_logp = SumExceptBatchMetric()
-        self.test_E_logp = SumExceptBatchMetric()
+        self.val_loss = ValLossDiscrete(self.cfg.model.lambda_train)
+        self.test_loss = TestLossDiscrete(self.cfg.model.lambda_train)
 
         self.train_metrics = train_metrics
         self.sampling_metrics = sampling_metrics
@@ -114,7 +106,13 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         pred = self.forward(noisy_data, extra_data, node_mask)
         loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
                                true_X=X, true_E=E, true_y=data.y, noisy_X_t=noisy_data["X_t"], noisy_E_t=noisy_data["E_t"], t=noisy_data["t_int"], 
-                               log=i % self.log_every_steps == 0)
+                               t_e=noisy_data["t_e_int"], log=i % self.log_every_steps == 0)
+        #loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+        #                       true_X=X, true_E=E, true_y=data.y, noisy_X_t=noisy_data["X_t"], noisy_E_t=noisy_data["E_t"], t=noisy_data["t_int"], 
+        #                       log=i % self.log_every_steps == 0)
+        #loss = self.train_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+        #                       true_X=X, true_E=E, true_y=data.y,
+        #                       log=i % self.log_every_steps == 0)
 
         self.train_metrics(masked_pred_X=pred.X, masked_pred_E=pred.E, true_X=X, true_E=E,
                            log=i % self.log_every_steps == 0)
@@ -148,38 +146,33 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         print(torch.cuda.memory_summary())
 
     def on_validation_epoch_start(self) -> None:
-        self.val_nll.reset()
-        self.val_X_kl.reset()
-        self.val_E_kl.reset()
-        self.val_X_logp.reset()
-        self.val_E_logp.reset()
+        self.val_loss.reset()
+        self.start_val_epoch_time = time.time()
         self.sampling_metrics.reset()
 
     def validation_step(self, data, i):
+        if data.edge_index.numel() == 0:
+            self.print("Found a batch with no edges. Skipping.")
+            return
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
         dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
+        X, E = dense_data.X, dense_data.E
+        noisy_data = self.apply_noise(X, E, data.y, node_mask)
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
-        #nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y,  node_mask, test=False)
-        nll = self.kl_prior(dense_data.X, dense_data.E, node_mask)
-        return {'loss': nll}
+        loss = self.val_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+                               true_X=X, true_E=E, true_y=data.y, noisy_X_t=noisy_data["X_t"], noisy_E_t=noisy_data["E_t"], t=noisy_data["t_int"], 
+                               t_e=noisy_data["t_e_int"], log=i % self.log_every_steps == 0)
+        return {'loss': loss}
 
     def on_validation_epoch_end(self) -> None:
-        metrics = [self.val_nll.compute(), self.val_X_kl.compute() * self.T, self.val_E_kl.compute() * self.T,
-                   self.val_X_logp.compute(), self.val_E_logp.compute()]
+        to_log = self.val_loss.log_epoch_metrics()
         if wandb.run:
-            wandb.log({"val/epoch_NLL": metrics[0],
-                       "val/X_kl": metrics[1],
-                       "val/E_kl": metrics[2],
-                       "val/X_logp": metrics[3],
-                       "val/E_logp": metrics[4]}, commit=False)
-
-        self.print(f"Epoch {self.current_epoch}: Val NLL {metrics[0] :.2f} -- Val Atom type KL {metrics[1] :.2f} -- ",
-                   f"Val Edge type KL: {metrics[2] :.2f}")
+            wandb.log(to_log, commit=False)
+        val_nll = to_log['val_epoch/x_CE'] + to_log['val_epoch/E_CE'] + to_log['val_epoch/y_CE']
+        self.print(f"Epoch {self.current_epoch}: Val Loss {val_nll :.2f}")
 
         # Log val nll with default Lightning logger, so it can be monitored by checkpoint callback
-        val_nll = metrics[0]
         self.log("val/epoch_NLL", val_nll, sync_dist=True)
 
         if val_nll < self.best_val_nll:
@@ -218,39 +211,33 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
     def on_test_epoch_start(self) -> None:
         self.print("Starting test...")
-        self.test_nll.reset()
-        self.test_X_kl.reset()
-        self.test_E_kl.reset()
-        self.test_X_logp.reset()
-        self.test_E_logp.reset()
+        self.start_test_epoch_time = time.time()
         if self.local_rank == 0:
             utils.setup_wandb(self.cfg)
 
     def test_step(self, data, i):
+        if data.edge_index.numel() == 0:
+            self.print("Found a batch with no edges. Skipping.")
+            return
         dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
         dense_data = dense_data.mask(node_mask)
-        noisy_data = self.apply_noise(dense_data.X, dense_data.E, data.y, node_mask)
+        X, E = dense_data.X, dense_data.E
+        noisy_data = self.apply_noise(X, E, data.y, node_mask)
         extra_data = self.compute_extra_data(noisy_data)
         pred = self.forward(noisy_data, extra_data, node_mask)
-        #nll = self.compute_val_loss(pred, noisy_data, dense_data.X, dense_data.E, data.y, node_mask, test=True)
-        nll = self.kl_prior(dense_data.X, dense_data.E, node_mask)
-        return {'loss': nll}
+        loss = self.test_loss(masked_pred_X=pred.X, masked_pred_E=pred.E, pred_y=pred.y,
+                               true_X=X, true_E=E, true_y=data.y, noisy_X_t=noisy_data["X_t"], noisy_E_t=noisy_data["E_t"], t=noisy_data["t_int"], 
+                               t_e=noisy_data["t_e_int"], log=i % self.log_every_steps == 0)
+        return {'loss': loss}
 
     def on_test_epoch_end(self) -> None:
         """ Measure likelihood on a test set and compute stability metrics. """
-        metrics = [self.test_nll.compute(), self.test_X_kl.compute(), self.test_E_kl.compute(),
-                   self.test_X_logp.compute(), self.test_E_logp.compute()]
+        to_log = self.test_loss.log_epoch_metrics()
         if wandb.run:
-            wandb.log({"test/epoch_NLL": metrics[0],
-                       "test/X_kl": metrics[1],
-                       "test/E_kl": metrics[2],
-                       "test/X_logp": metrics[3],
-                       "test/E_logp": metrics[4]}, commit=False)
+            wandb.log(to_log, commit=False)
+        test_nll = to_log['test_epoch/x_CE'] + to_log['test_epoch/E_CE'] + to_log['test_epoch/y_CE']
+        self.print(f"Epoch {self.current_epoch}: Val Loss {test_nll :.2f}")
 
-        self.print(f"Epoch {self.current_epoch}: Test NLL {metrics[0] :.2f} -- Test Atom type KL {metrics[1] :.2f} -- ",
-                   f"Test Edge type KL: {metrics[2] :.2f}")
-
-        test_nll = metrics[0]
         if wandb.run:
             wandb.log({"test/epoch_NLL": test_nll}, commit=False)
 
@@ -300,110 +287,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         self.sampling_metrics(samples, self.name, self.current_epoch, self.val_counter, test=True, local_rank=self.local_rank)
         self.print("Done testing.")
 
-
-    def kl_prior(self, X, E, node_mask):
-        """Computes the KL between q(z1 | x) and the prior p(z1) = Normal(0, 1).
-
-        This is essentially a lot of work for something that is in practice negligible in the loss. However, you
-        compute it so that you see it when you've made a mistake in your noise schedule.
-        """
-        # Compute the last alpha value, alpha_T.
-        ones = torch.ones((X.size(0), 1), device=X.device)
-        Ts = self.T * ones
-        alpha_t_bar = self.noise_schedule.get_alpha_bar(t_int=Ts)  # (bs, 1)
-
-        Qtb = self.transition_model.get_Qt_bar(alpha_t_bar, self.device)
-
-        # Compute transition probabilities
-        probX = X @ Qtb.X  # (bs, n, dx_out)
-        probE = E @ Qtb.E.unsqueeze(1)  # (bs, n, n, de_out)
-        assert probX.shape == X.shape
-
-        bs, n, _ = probX.shape
-
-        limit_X = self.limit_dist.X[None, None, :].expand(bs, n, -1).type_as(probX)
-        limit_E = self.limit_dist.E[None, None, None, :].expand(bs, n, n, -1).type_as(probE)
-
-        # Make sure that masked rows do not contribute to the loss
-        limit_dist_X, limit_dist_E, probX, probE = diffusion_utils.mask_distributions(true_X=limit_X.clone(),
-                                                                                      true_E=limit_E.clone(),
-                                                                                      pred_X=probX,
-                                                                                      pred_E=probE,
-                                                                                      node_mask=node_mask)
-
-        kl_distance_X = F.kl_div(input=probX.log(), target=limit_dist_X, reduction='none')
-        kl_distance_E = F.kl_div(input=probE.log(), target=limit_dist_E, reduction='none')
-
-        return diffusion_utils.sum_except_batch(kl_distance_X) + \
-               diffusion_utils.sum_except_batch(kl_distance_E)
-
-    def compute_Lt(self, X, E, y, pred, noisy_data, node_mask, test):
-        pred_probs_X = F.softmax(pred.X, dim=-1)
-        pred_probs_E = F.softmax(pred.E, dim=-1)
-        pred_probs_y = F.softmax(pred.y, dim=-1)
-
-        Qtb = self.transition_model.get_Qt_bar(noisy_data['alpha_t_bar'], self.device)
-        Qsb = self.transition_model.get_Qt_bar(noisy_data['alpha_s_bar'], self.device)
-        Qt = self.transition_model.get_Qt(noisy_data['beta_t'], self.device)
-
-        # Compute distributions to compare with KL
-        bs, n, d = X.shape
-        prob_true = diffusion_utils.posterior_distributions(X=X, E=E, y=y, X_t=noisy_data['X_t'], E_t=noisy_data['E_t'],
-                                                            y_t=noisy_data['y_t'], Qt=Qt, Qsb=Qsb, Qtb=Qtb)
-        prob_true.E = prob_true.E.reshape((bs, n, n, -1))
-        prob_pred = diffusion_utils.posterior_distributions(X=pred_probs_X, E=pred_probs_E, y=pred_probs_y,
-                                                            X_t=noisy_data['X_t'], E_t=noisy_data['E_t'],
-                                                            y_t=noisy_data['y_t'], Qt=Qt, Qsb=Qsb, Qtb=Qtb)
-        prob_pred.E = prob_pred.E.reshape((bs, n, n, -1))
-
-        # Reshape and filter masked rows
-        prob_true_X, prob_true_E, prob_pred.X, prob_pred.E = diffusion_utils.mask_distributions(true_X=prob_true.X,
-                                                                                                true_E=prob_true.E,
-                                                                                                pred_X=prob_pred.X,
-                                                                                                pred_E=prob_pred.E,
-                                                                                                node_mask=node_mask)
-        kl_x = (self.test_X_kl if test else self.val_X_kl)(prob_true.X, torch.log(prob_pred.X))
-        kl_e = (self.test_E_kl if test else self.val_E_kl)(prob_true.E, torch.log(prob_pred.E))
-        return self.T * (kl_x + kl_e)
-
-    def reconstruction_logp(self, t, X, E, node_mask):
-        # Compute noise values for t = 0.
-        t_zeros = torch.zeros_like(t)
-        beta_0 = self.noise_schedule(t_zeros)
-        Q0 = self.transition_model.get_Qt(beta_t=beta_0, device=self.device)
-
-        probX0 = X @ Q0.X  # (bs, n, dx_out)
-        probE0 = E @ Q0.E.unsqueeze(1)  # (bs, n, n, de_out)
-
-        sampled0 = diffusion_utils.sample_discrete_features(self.limit_dist, probX=probX0, probE=probE0, node_mask=node_mask)
-
-        X0 = F.one_hot(sampled0.X, num_classes=self.Xdim_output).float()
-        E0 = F.one_hot(sampled0.E, num_classes=self.Edim_output).float()
-        y0 = sampled0.y
-        assert (X.shape == X0.shape) and (E.shape == E0.shape)
-
-        sampled_0 = utils.PlaceHolder(X=X0, E=E0, y=y0).mask(node_mask)
-
-        # Predictions
-        noisy_data = {'X_t': sampled_0.X, 'E_t': sampled_0.E, 'y_t': sampled_0.y, 'node_mask': node_mask,
-                      't': torch.zeros(X0.shape[0], 1).type_as(y0)}
-        extra_data = self.compute_extra_data(noisy_data)
-        pred0 = self.forward(noisy_data, extra_data, node_mask)
-
-        # Normalize predictions
-        probX0 = F.softmax(pred0.X, dim=-1)
-        probE0 = F.softmax(pred0.E, dim=-1)
-        proby0 = F.softmax(pred0.y, dim=-1)
-
-        # Set masked rows to arbitrary values that don't contribute to loss
-        probX0[~node_mask] = torch.ones(self.Xdim_output).type_as(probX0)
-        probE0[~(node_mask.unsqueeze(1) * node_mask.unsqueeze(2))] = torch.ones(self.Edim_output).type_as(probE0)
-
-        diag_mask = torch.eye(probE0.size(1)).type_as(probE0).bool()
-        diag_mask = diag_mask.unsqueeze(0).expand(probE0.size(0), -1, -1)
-        probE0[diag_mask] = torch.ones(self.Edim_output).type_as(probE0)
-
-        return utils.PlaceHolder(X=probX0, E=probE0, y=proby0)
+    
 
     def apply_noise1111111(self, X, E, y, node_mask): #最原始的采样
         #Sample noise and apply it to the data.
@@ -619,7 +503,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return noisy_data
 
 
-    def apply_noise(self, X, E, y, node_mask): #点和边共同采样
+    def apply_noise0101(self, X, E, y, node_mask): #点和边共同采样
         """ 
         Sample noise and apply it to the graph data by randomly selecting 
         t nodes and t edges to perturb based on transition probabilities.
@@ -643,7 +527,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         # Sample t_nodes: integers between 1 and num_nodes (inclusive)
         t_nodes = torch.randint(1, num_nodes + 1, size=(batch_size, 1), device=device)  # Shape: (batch_size, 1)
-    
         # Sample t_edges: integers between 1 and num_edges (inclusive)
         t_edges = ((num_nodes - 1) * t_nodes) // 2
 
@@ -768,7 +651,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         exit()
         """
         z_t = utils.PlaceHolder(X=X_t_final, E=E_t_final, y=y).type_as(X_t_final).mask(node_mask)
-
         noisy_data = {
         't_int': t_nodes,
         't_nodes': t_nodes.float() / num_nodes,          # Shape: (batch_size,)
@@ -780,6 +662,657 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
     }
 
         return noisy_data
+
+    def apply_noise010101(self, X, E, y, node_mask):  # 点和边共同采样, 只focus有效节点
+        """
+        通过随机选择 t 个节点和 t 条边来对图数据添加噪声，基于节点和边的有效性。
+
+        参数：
+            X (torch.Tensor): 节点特征，形状为 (batch_size, num_nodes, dx_in)。
+            E (torch.Tensor): 边特征，形状为 (batch_size, num_nodes, num_nodes, de_in)。
+            y (torch.Tensor): 标签或其他附加数据。
+            node_mask (torch.Tensor): 节点有效性掩码，形状为 (batch_size, num_nodes)。
+
+        返回：
+            dict: 包含加噪后的数据和相关信息的字典。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从 1 到 有效节点数+1 中随机选择 t_nodes，形状为 (batch_size,)
+        rand_floats_nodes = torch.rand(batch_size, device=device)
+        t_nodes = (rand_floats_nodes * valid_nodes_per_graph.float()).long() + 1  # 保证至少为1
+
+        # 生成节点的随机分数，形状为 (batch_size, num_nodes)
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 t_nodes 个节点，形状为 (batch_size, num_nodes)
+        mask_nodes = range_tensor_nodes < t_nodes.unsqueeze(1)
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # 对于边，首先计算每个图的有效边数
+        # 创建节点有效性掩码，用于构建有效边掩码
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # 形状为 (batch_size, num_nodes, num_nodes)
+
+        # 获取上三角形（不包括对角线）的索引
+        triu_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)  # (2, num_edges)
+
+        # 对于每个图，获取有效边的掩码，形状为 (batch_size, num_edges)
+        valid_edge_mask_upper = node_mask_expanded[:, triu_indices[0], triu_indices[1]]
+
+        # 计算每个图的有效边数，形状为 (batch_size,)
+        valid_edges_per_graph = valid_edge_mask_upper.sum(dim=1)
+
+        # 计算边的噪声比例
+        ratio = t_nodes.float() / valid_nodes_per_graph.float()  # 形状为 (batch_size,)
+
+        # 计算 t_edges，确保不超过有效边数
+        t_edges = (ratio * valid_edges_per_graph.float()).long()
+        t_edges = torch.clamp(t_edges, min=torch.tensor(0, device=device), max=valid_edges_per_graph)  # 保证至少为1，且不超过有效边数
+
+        # 生成边的随机分数，形状为 (batch_size, num_edges)
+        rand_edges = torch.rand(batch_size, triu_indices.size(1), device=device)
+        # 将无效边的分数设为 -inf
+        rand_edges[~valid_edge_mask_upper] = -float('inf')
+
+        # 对边的分数进行降序排序
+        sorted_scores_edges, sorted_indices_edges = torch.sort(rand_edges, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_edges)
+        range_tensor_edges = torch.arange(triu_indices.size(1), device=device).unsqueeze(0).expand(batch_size, triu_indices.size(1))
+
+        # 创建掩码，选择前 t_edges 条边
+        mask_edges = range_tensor_edges < t_edges.unsqueeze(1)
+
+        # 根据排序后的索引和掩码，创建加噪边的掩码
+        edge_mask_noise_flat = torch.zeros_like(mask_edges, dtype=torch.bool)
+        edge_mask_noise_flat.scatter_(1, sorted_indices_edges, mask_edges)
+
+        # 扩展 triu_indices，形状为 (batch_size, 2, num_edges)
+        triu_indices_exp = triu_indices.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # 创建批次索引，形状为 (batch_size, num_edges)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, triu_indices.size(1))
+
+        # 选取被加噪的边的索引
+        selected_rows = triu_indices_exp[:, 0, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_cols = triu_indices_exp[:, 1, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_batch = batch_indices[edge_mask_noise_flat]  # (num_selected_edges,)
+
+        # 初始化边的噪声掩码，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.bool, device=device)
+
+        # 设置上三角形中被加噪的边
+        edge_mask_noise[selected_batch, selected_rows, selected_cols] = True
+        # 确保边的对称性，设置对应的下三角形边
+        edge_mask_noise[selected_batch, selected_cols, selected_rows] = True
+
+        # 获取节点和边的状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)  # 根据您的实现进行调整
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_t = sampled.X  # (batch_size, num_nodes)
+        E_t = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_t_final = X.clone()
+        E_t_final = E.clone()
+
+        # 仅对加噪的节点进行更新
+        X_t_final[node_mask_noise] = F.one_hot(X_t[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_t_final[edge_mask_noise] = F.one_hot(E_t[edge_mask_noise], num_classes=self.Edim_output).float()
+
+        z_t = utils.PlaceHolder(X=X_t_final, E=E_t_final, y=y).type_as(X_t_final).mask(node_mask)
+
+        """ print(111)
+        print(t_nodes[1])
+        print(t_edges[1])
+        print(X[1].argmax(dim=-1))
+        print(E[1].argmax(dim=-1))
+        print(node_mask_noise[1])
+        print(edge_mask_noise[1])
+        print(probX_selected[1])
+        print(probE_selected[1])
+        print(X_t[1])
+        print(E_t[1])
+        print(z_t.X[1].argmax(dim=-1))
+        print(z_t.E[1].argmax(dim=-1))
+        exit() """
+        noisy_data = {
+            't_int': t_nodes,
+            't_e_int':t_edges,
+            't_nodes': t_nodes.unsqueeze(1).float() / valid_nodes_per_graph.unsqueeze(1).float(),  # 形状: (batch_size, 1)
+            't_edges': t_edges.unsqueeze(1).float() / (valid_edges_per_graph.unsqueeze(1).float() + 1e-8),  # 形状: (batch_size, 1)
+            'X_t': z_t.X,                        # (batch_size, num_nodes, dx_out)
+            'E_t': z_t.E,                        # (batch_size, num_nodes, num_nodes, de_out)
+            'y_t': z_t.y,
+            'node_mask': node_mask               # (batch_size, num_nodes)
+        }
+
+        return noisy_data
+
+
+
+    def apply_noise10101010(self, X, E, y, node_mask):  # 点和边共同采样, 只focus有效节点构成的子图
+        """
+        通过随机选择 t 个节点并对这些节点之间的所有边添加噪声，基于节点和边的有效性。
+
+        参数：
+            X (torch.Tensor): 节点特征，形状为 (batch_size, num_nodes, dx_in)。
+            E (torch.Tensor): 边特征，形状为 (batch_size, num_nodes, num_nodes, de_in)。
+            y (torch.Tensor): 标签或其他附加数据。
+            node_mask (torch.Tensor): 节点有效性掩码，形状为 (batch_size, num_nodes)。
+
+        返回：
+            dict: 包含加噪后的数据和相关信息的字典。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从 1 到 有效节点数 中随机选择 t_nodes，形状为 (batch_size,)
+        rand_floats_nodes = torch.rand(batch_size, device=device)
+        t_nodes = (rand_floats_nodes * valid_nodes_per_graph.float()).long() + 1
+        t_nodes = torch.clamp(t_nodes, min=torch.tensor(1, device=device))  # 保证至少为1
+
+        # 生成节点的随机分数，形状为 (batch_size, num_nodes)
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 t_nodes 个节点，形状为 (batch_size, num_nodes)
+        mask_nodes = range_tensor_nodes < t_nodes.unsqueeze(1)
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # -------------------- 修改边的选择和加噪方式 --------------------
+
+        # 计算每个图的 t_edges，形状为 (batch_size,)
+        t_edges = t_nodes * (t_nodes - 1) // 2
+
+        # 构建节点之间的连接关系，获取被选中节点之间的所有可能边
+        # 首先，创建节点掩码，形状为 (batch_size, num_nodes, 1) 和 (batch_size, 1, num_nodes)
+        node_mask_noise_row = node_mask_noise.unsqueeze(2)  # (batch_size, num_nodes, 1)
+        node_mask_noise_col = node_mask_noise.unsqueeze(1)  # (batch_size, 1, num_nodes)
+
+        # 计算节点之间的连接关系，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = node_mask_noise_row & node_mask_noise_col
+
+        # 排除自环边（如果不需要自环边）
+        diag_mask = ~torch.eye(num_nodes, dtype=torch.bool, device=device).unsqueeze(0)  # (1, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & diag_mask  # (batch_size, num_nodes, num_nodes)
+
+        # 确保只考虑有效节点之间的边
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & node_mask_expanded
+
+        # 计算每个图的有效边数（被选中节点之间的边数）
+        valid_edges_per_graph = t_edges  # (batch_size,)
+
+        # -------------------- 结束修改边的选择和加噪方式 --------------------
+
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)  # 根据您的实现进行调整
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        """ probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True) """
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_t = sampled.X  # (batch_size, num_nodes)
+        E_t = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_t_final = X.clone()
+        E_t_final = E.clone()
+
+        # 仅对加噪的节点进行更新
+        X_t_final[node_mask_noise] = F.one_hot(X_t[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_t_final[edge_mask_noise] = F.one_hot(E_t[edge_mask_noise], num_classes=self.Edim_output).float()
+
+        z_t = utils.PlaceHolder(X=X_t_final, E=E_t_final, y=y).type_as(X_t_final).mask(node_mask)
+
+        """ print(111)
+        print(t_nodes[511])
+        print(t_edges[511])
+        #print(X[511].argmax(dim=-1))
+        print(E[511])
+        print(node_mask[511])
+        print(node_mask_noise[511])
+        print(edge_mask_noise[511])
+        #print(probX_selected[511])
+        print(probE_selected[511])
+        #print(X_t[511])
+        print(E_t[511])
+        #print(z_t.X[511].argmax(dim=-1))
+        print(z_t.E[511])
+        exit() """
+
+        noisy_data = {
+            't_int': t_nodes,
+            't_e_int': t_edges,
+            't_nodes': t_nodes.unsqueeze(1).float() / valid_nodes_per_graph.unsqueeze(1).float(),  # 形状: (batch_size, 1)
+            't_edges': t_edges.unsqueeze(1).float() / (valid_edges_per_graph.unsqueeze(1).float() + 1e-8),  # 形状: (batch_size, 1)
+            'X_t': z_t.X,                        # (batch_size, num_nodes, dx_out)
+            'E_t': z_t.E,                        # (batch_size, num_nodes, num_nodes, de_out)
+            'y_t': z_t.y,
+            'node_mask': node_mask               # (batch_size, num_nodes)
+        }
+
+        return noisy_data
+
+    def apply_noise0101001(self, X, E, y, node_mask):  # 点和边共同采样, 只focus有效节点构成的子图，以cos形式选择需要改变的节点数量
+        """
+        通过根据指定的比例选择 t 个节点并对这些节点之间的所有边添加噪声，基于节点和边的有效性。
+
+        参数：
+            X (torch.Tensor): 节点特征，形状为 (batch_size, num_nodes, dx_in)。
+            E (torch.Tensor): 边特征，形状为 (batch_size, num_nodes, num_nodes, de_in)。
+            y (torch.Tensor): 标签或其他附加数据。
+            node_mask (torch.Tensor): 节点有效性掩码，形状为 (batch_size, num_nodes)。
+
+        返回：
+            dict: 包含加噪后的数据和相关信息的字典。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+        # -------------------- 计算节点选择比例 --------------------
+        # 从 0 到 1 的均匀分布中随机采样 n_over_m，形状为 (batch_size,)
+        n_over_m = torch.rand(batch_size, device=device)  # 每个图都有自己的 n_over_m
+
+        # 计算 ratio = (1 - cos(0.5π * ((n/m + 0.008)/(1 + 0.008)))^2)
+        ratio = (1 - torch.cos(0.5 * math.pi * ((n_over_m + 0.008) / (1 + 0.008))) ** 2)  # ratio 为一个标量
+
+        # -------------------- 选择节点并添加噪声 --------------------
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 计算每个图需要选择的节点数量 t_nodes，确保在有效范围内
+        t_nodes = (ratio * valid_nodes_per_graph.float()).long() + 1
+        t_nodes = torch.clamp(t_nodes, min=torch.tensor(1, device=device), max=valid_nodes_per_graph)  # 保证至少为1，至多为有效节点数
+
+        # 生成节点的随机分数，形状为 (batch_size, num_nodes)
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 t_nodes 个节点，形状为 (batch_size, num_nodes)
+        mask_nodes = range_tensor_nodes < t_nodes.unsqueeze(1)
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码 node_mask_noise
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # -------------------- 选择边并添加噪声 --------------------
+
+        # 计算每个图的 t_edges，形状为 (batch_size,)
+        t_edges = t_nodes * (t_nodes - 1) // 2
+
+        # 构建被选中节点之间的连接关系，获取所有可能的边
+        node_mask_noise_row = node_mask_noise.unsqueeze(2)  # (batch_size, num_nodes, 1)
+        node_mask_noise_col = node_mask_noise.unsqueeze(1)  # (batch_size, 1, num_nodes)
+
+        # 计算节点之间的连接关系 edge_mask_noise，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = node_mask_noise_row & node_mask_noise_col
+
+        # 排除自环边（如果不需要自环边）
+        diag_mask = ~torch.eye(num_nodes, dtype=torch.bool, device=device).unsqueeze(0)  # (1, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & diag_mask  # (batch_size, num_nodes, num_nodes)
+
+        # 确保只考虑有效节点之间的边
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & node_mask_expanded
+
+        # 计算每个图的有效边数（被选中节点之间的边数）
+        valid_edges_per_graph = t_edges  # (batch_size,)
+
+        # -------------------- 计算转移概率并添加噪声 --------------------
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)  # 根据您的实现进行调整
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+        # -------------------- 采样并更新节点和边特征 --------------------
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_t = sampled.X  # (batch_size, num_nodes)
+        E_t = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_t_final = X.clone()
+        E_t_final = E.clone()
+
+        # 仅对加噪的节点进行更新
+        X_t_final[node_mask_noise] = F.one_hot(X_t[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_t_final[edge_mask_noise] = F.one_hot(E_t[edge_mask_noise], num_classes=self.Edim_output).float()
+
+        # 创建占位符并应用节点掩码
+        z_t = utils.PlaceHolder(X=X_t_final, E=E_t_final, y=y).type_as(X_t_final).mask(node_mask)
+
+        # -------------------- 返回加噪后的数据 --------------------
+
+        noisy_data = {
+            't_int': t_nodes,
+            't_e_int': t_edges,
+            't_nodes': t_nodes.unsqueeze(1).float() / valid_nodes_per_graph.unsqueeze(1).float(),  # 形状: (batch_size, 1)
+            't_edges': t_edges.unsqueeze(1).float() / (valid_edges_per_graph.unsqueeze(1).float() + 1e-8),  # 形状: (batch_size, 1)
+            'X_t': z_t.X,                        # (batch_size, num_nodes, dx_out)
+            'E_t': z_t.E,                        # (batch_size, num_nodes, num_nodes, de_out)
+            'y_t': z_t.y,
+            'node_mask': node_mask               # (batch_size, num_nodes)
+        }
+
+        return noisy_data
+
+    def apply_noise(self, X, E, y, node_mask):  # 点和边共同采样, 只focus有效节点之间的子图，按比例选边
+        """
+        通过随机选择 t 个节点并对这些节点之间的部分边添加噪声，基于节点和边的有效性。
+
+        参数：
+            X (torch.Tensor): 节点特征，形状为 (batch_size, num_nodes, dx_in)。
+            E (torch.Tensor): 边特征，形状为 (batch_size, num_nodes, num_nodes, de_in)。
+            y (torch.Tensor): 标签或其他附加数据。
+            node_mask (torch.Tensor): 节点有效性掩码，形状为 (batch_size, num_nodes)。
+
+        返回：
+            dict: 包含加噪后的数据和相关信息的字典。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+
+        # -------------------- 计算节点选择比例 --------------------
+        # 从 0 到 1 的均匀分布中随机采样 n_over_m，形状为 (batch_size,)
+        n_over_m = torch.rand(batch_size, device=device)  # 每个图都有自己的 n_over_m
+
+        # 计算 ratio = (1 - cos(0.5π * ((n/m + 0.008)/(1 + 0.008)))^2)
+        ratio = (1 - torch.cos(0.5 * math.pi * ((n_over_m + 0.008) / (1 + 0.008))) ** 2)  # ratio 为一个标量
+
+        # -------------------- 选择节点并添加噪声 --------------------
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 计算每个图需要选择的节点数量 t_nodes，确保在有效范围内
+        t_nodes = (ratio * valid_nodes_per_graph.float()).long() + 1
+        t_nodes = torch.clamp(t_nodes, min=torch.tensor(1, device=device), max=valid_nodes_per_graph)  # 保证至少为1，至多为有效节点数
+
+
+
+        """ # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从 1 到 有效节点数 中随机选择 t_nodes，形状为 (batch_size,)
+        rand_floats_nodes = torch.rand(batch_size, device=device)
+        t_nodes = (rand_floats_nodes * valid_nodes_per_graph.float()).long() + 1
+        t_nodes = torch.clamp(t_nodes, torch.tensor(1, device=device))  # 保证至少为1  """
+
+        
+
+        # 生成节点的随机分数，形状为 (batch_size, num_nodes)
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 t_nodes 个节点，形状为 (batch_size, num_nodes)
+        mask_nodes = range_tensor_nodes < t_nodes.unsqueeze(1)
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # -------------------- 修改边的选择和加噪方式 --------------------
+
+        # 构建节点之间的连接关系，获取被选中节点之间的所有可能边
+        node_mask_noise_row = node_mask_noise.unsqueeze(2)  # (batch_size, num_nodes, 1)
+        node_mask_noise_col = node_mask_noise.unsqueeze(1)  # (batch_size, 1, num_nodes)
+
+        # 计算节点之间的连接关系，形状为 (batch_size, num_nodes, num_nodes)
+        potential_edge_mask = node_mask_noise_row & node_mask_noise_col
+
+        # 排除自环边（如果不需要自环边）
+        diag_mask = ~torch.eye(num_nodes, dtype=torch.bool, device=device).unsqueeze(0)  # (1, num_nodes, num_nodes)
+        potential_edge_mask = potential_edge_mask & diag_mask  # (batch_size, num_nodes, num_nodes)
+
+        # 确保只考虑有效节点之间的边
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # (batch_size, num_nodes, num_nodes)
+        potential_edge_mask = potential_edge_mask & node_mask_expanded
+
+        # 获取上三角形（不包括对角线）的索引
+        triu_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)  # (2, num_edges)
+
+        # 获取每个图中潜在加噪边的掩码，形状为 (batch_size, num_edges)
+        potential_edge_mask_upper = potential_edge_mask[:, triu_indices[0], triu_indices[1]]  # (batch_size, num_edges)
+
+        # 从潜在加噪边中随机选择一部分边来添加噪声
+        edge_noise_ratio = 0.1  # 控制边噪声的比例，可根据需要调整（0到1之间）
+        rand_edges = torch.rand(batch_size, triu_indices.size(1), device=device)
+        rand_edges[~potential_edge_mask_upper] = 2.0  # 将不可用的边的随机数设为大于1的值，确保不会被选中
+
+        # 根据 edge_noise_ratio 选择加噪边
+        edge_threshold = torch.quantile(rand_edges, edge_noise_ratio, dim=1, keepdim=True)
+        edge_mask_noise_flat = rand_edges <= edge_threshold
+
+        # 确保只选择潜在的边
+        edge_mask_noise_flat = edge_mask_noise_flat & potential_edge_mask_upper
+
+        # 扩展 triu_indices，形状为 (batch_size, 2, num_edges)
+        triu_indices_exp = triu_indices.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # 创建批次索引，形状为 (batch_size, num_edges)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, triu_indices.size(1))
+
+        # 选取被加噪的边的索引
+        selected_rows = triu_indices_exp[:, 0, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_cols = triu_indices_exp[:, 1, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_batch = batch_indices[edge_mask_noise_flat]  # (num_selected_edges,)
+
+        # 初始化边的噪声掩码，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.bool, device=device)
+
+        # 设置上三角形中被加噪的边
+        edge_mask_noise[selected_batch, selected_rows, selected_cols] = True
+        # 确保边的对称性，设置对应的下三角形边
+        edge_mask_noise[selected_batch, selected_cols, selected_rows] = True
+
+        # 计算每个图的 t_edges，形状为 (batch_size,)
+        t_edges = edge_mask_noise_flat.sum(dim=1)
+
+        # 计算每个图的有效边数（被选中节点之间的边数）
+        valid_edges_per_graph = potential_edge_mask_upper.sum(dim=1)  # (batch_size,)
+
+        # -------------------- 结束修改边的选择和加噪方式 --------------------
+
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)  # 根据您的实现进行调整
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_t = sampled.X  # (batch_size, num_nodes)
+        E_t = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_t_final = X.clone()
+        E_t_final = E.clone()
+
+        # 仅对加噪的节点进行更新
+        X_t_final[node_mask_noise] = F.one_hot(X_t[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_t_final[edge_mask_noise] = F.one_hot(E_t[edge_mask_noise], num_classes=self.Edim_output).float()
+
+        z_t = utils.PlaceHolder(X=X_t_final, E=E_t_final, y=y).type_as(X_t_final).mask(node_mask)
+
+        noisy_data = {
+            't_int': t_nodes,
+            't_e_int': t_edges,
+            't_nodes': t_nodes.unsqueeze(1).float() / valid_nodes_per_graph.unsqueeze(1).float(),  # 形状: (batch_size, 1)
+            't_edges': t_edges.unsqueeze(1).float() / (valid_edges_per_graph.unsqueeze(1).float() + 1e-8),  # 形状: (batch_size, 1)
+            'X_t': z_t.X,                        # (batch_size, num_nodes, dx_out)
+            'E_t': z_t.E,                        # (batch_size, num_nodes, num_nodes, de_out)
+            'y_t': z_t.y,
+            'node_mask': node_mask               # (batch_size, num_nodes)
+        }
+
+        return noisy_data
+
+
 
     def apply_noise11111(self, X, E, y, node_mask): #边依赖点
         """ 
@@ -1092,48 +1625,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         }
 
         return noisy_data
-
-
-    def compute_val_loss(self, pred, noisy_data, X, E, y, node_mask, test=False):
-        """Computes an estimator for the variational lower bound.
-           pred: (batch_size, n, total_features)
-           noisy_data: dict
-           X, E, y : (bs, n, dx),  (bs, n, n, de), (bs, dy)
-           node_mask : (bs, n)
-           Output: nll (size 1)
-       """
-        t = noisy_data['t']
-
-        # 1.
-        N = node_mask.sum(1).long()
-        log_pN = self.node_dist.log_prob(N)
-
-        # 2. The KL between q(z_T | x) and p(z_T) = Uniform(1/num_classes). Should be close to zero.
-        kl_prior = self.kl_prior(X, E, node_mask)
-
-        # 3. Diffusion loss
-        loss_all_t = self.compute_Lt(X, E, y, pred, noisy_data, node_mask, test)
-
-        # 4. Reconstruction loss
-        # Compute L0 term : -log p (X, E, y | z_0) = reconstruction loss
-        prob0 = self.reconstruction_logp(t, X, E, node_mask)
-
-        loss_term_0 = self.val_X_logp(X * prob0.X.log()) + self.val_E_logp(E * prob0.E.log())
-
-        # Combine terms
-        nlls = - log_pN + kl_prior + loss_all_t - loss_term_0
-        assert len(nlls.shape) == 1, f'{nlls.shape} has more than only batch dim.'
-
-        # Update NLL metric object and return batch nll
-        nll = (self.test_nll if test else self.val_nll)(nlls)        # Average over the batch
-
-        if wandb.run:
-            wandb.log({"kl prior": kl_prior.mean(),
-                       "Estimator loss terms": loss_all_t.mean(),
-                       "log_pn": log_pN.mean(),
-                       "loss_term_0": loss_term_0,
-                       'batch_test_nll' if test else 'val_nll': nll}, commit=False)
-        return nll
 
     def forward(self, noisy_data, extra_data, node_mask):
         X = torch.cat((noisy_data['X_t'], extra_data.X), dim=2).float()
@@ -1486,7 +1977,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
 
     @torch.no_grad()
-    def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
+    def sample_batch0101(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
                      save_final: int, num_nodes=None):  #点和边真正的同时
         """
         :param batch_id: int
@@ -1527,10 +2018,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         total_node_steps = n_max
         total_edge_steps = n_max * (n_max - 1) // 2
 
-        for step in reversed(range(total_steps + 1)):
-            t = step  
-            s_nodes = t - 1
-            t_nodes = t
+        for step in reversed(range(total_steps)):
+            s = step  
+            s_nodes = s
+            t_nodes = s + 1
 
             s_edges = ((n_max - 1) * s_nodes) // 2
             t_edges = ((n_max - 1) * t_nodes) // 2
@@ -1562,7 +2053,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             write_index = t_nodes
             chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
             chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
-
         # Sample
         sampled = utils.PlaceHolder(X=X, E=E, y=torch.zeros(y.shape[0], 0))
         sampled = sampled.mask(node_mask, collapse=True)
@@ -1617,6 +2107,311 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
 
         return molecule_list
 
+    @torch.no_grad()
+    def sample_batch0101001(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
+                    save_final: int, num_nodes=None):  # 点和边真正的同时，只focus有效节点
+        """
+        :param batch_id: int
+        :param batch_size: int
+        :param num_nodes: int, <int>tensor (batch_size) (optional) for specifying number of nodes
+        :param save_final: int: number of predictions to save to file
+        :param keep_chain: int: number of chains to save to file
+        :param number_chain_steps: number of timesteps to save for each chain
+        :return: molecule_list. Each element of this list is a tuple (atom_types, edge_types)
+        """
+        if num_nodes is None:
+            n_nodes = self.node_dist.sample_n(batch_size, self.device)
+        elif type(num_nodes) == int:
+            n_nodes = num_nodes * torch.ones(batch_size, device=self.device, dtype=torch.int)
+        else:
+            assert isinstance(num_nodes, torch.Tensor)
+            n_nodes = num_nodes
+
+        n_max = torch.max(n_nodes).item()
+        # 构建节点掩码
+        arange = torch.arange(n_max, device=self.device).unsqueeze(0).expand(batch_size, -1)
+        node_mask = arange < n_nodes.unsqueeze(1)
+        # 采样初始噪声  -- z_T 形状为 (batch_size, n_max, feature_dim)
+        z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
+        X, E, y = z_T.X, z_T.E, z_T.y
+        assert (E == torch.transpose(E, 1, 2)).all()
+
+        # 定义链的尺寸，用于保存中间结果
+        chain_X_size = torch.Size((number_chain_steps + 1, keep_chain, X.size(1)))
+        chain_E_size = torch.Size((number_chain_steps + 1, keep_chain, E.size(1), E.size(2)))
+
+        chain_X = torch.zeros(chain_X_size, device=self.device)
+        chain_E = torch.zeros(chain_E_size, device=self.device)
+
+        # 计算每个图的有效节点数
+        valid_nodes_per_graph = n_nodes  # 形状为 (batch_size,)
+        max_node_steps = valid_nodes_per_graph.max().item()  # 最大的有效节点数
+
+        # 初始化 t_nodes 为有效节点数的张量，形状为 (batch_size,)
+        t_nodes = valid_nodes_per_graph.clone()  # 初始化为有效节点数
+
+        # 计算每个图的有效边数
+        valid_edges_per_graph = (valid_nodes_per_graph * (valid_nodes_per_graph - 1)) // 2  # 形状为 (batch_size,)
+
+        # 初始化 t_edges 为有效边数的张量，形状为 (batch_size,)
+        t_edges = valid_edges_per_graph.clone()
+
+        # 计算总的时间步数（以最大节点数为准）
+        total_steps = max_node_steps
+
+        for step in reversed(range(total_steps + 1)):
+            # 对于每个时间步，计算对应的 s_nodes 和 t_nodes
+            s_nodes = t_nodes - 1  # 形状为 (batch_size,)
+            s_nodes = torch.clamp(s_nodes, min=0)  # 保证不小于0
+
+            # 对于边，同样计算 s_edges 和 t_edges
+            s_edges = (valid_nodes_per_graph - 1) * s_nodes // 2
+            s_edges = torch.clamp(s_edges, min=0)
+
+            # 计算归一化的 s 和 t
+            s_norm_nodes = s_nodes.float() / valid_nodes_per_graph.float()
+            t_norm_nodes = t_nodes.float() / valid_nodes_per_graph.float()
+
+            s_norm_edges = s_edges.float() / valid_edges_per_graph.float()
+            t_norm_edges = t_edges.float() / valid_edges_per_graph.float()
+
+            # 将 s 和 t 转换为张量，形状为 (batch_size, 1)
+            s_nodes_tensor = s_nodes.unsqueeze(1).float()
+            t_nodes_tensor = t_nodes.unsqueeze(1).float()
+            s_norm_nodes_tensor = s_norm_nodes.unsqueeze(1)
+            t_norm_nodes_tensor = t_norm_nodes.unsqueeze(1)
+
+            s_edges_tensor = s_edges.unsqueeze(1).float()
+            t_edges_tensor = t_edges.unsqueeze(1).float()
+            s_norm_edges_tensor = s_norm_edges.unsqueeze(1)
+            t_norm_edges_tensor = t_norm_edges.unsqueeze(1)
+
+            # 调用采样函数，从 z_t 采样 z_s
+            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(
+                s_nodes_tensor, t_nodes_tensor, s_edges_tensor, t_edges_tensor,
+                s_norm_nodes_tensor, t_norm_nodes_tensor, s_norm_edges_tensor, t_norm_edges_tensor,
+                X, E, y, node_mask)
+
+            X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+
+            # 保存中间结果
+            write_index = t_nodes.min().item()  # 使用最小的 t_nodes 作为索引
+            if write_index < chain_X.size(0):
+                chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
+                chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
+
+            # 更新 t_nodes 和 t_edges，为下一时间步做准备
+            t_nodes = s_nodes
+            t_edges = s_edges
+
+        # 最终的采样结果
+        sampled = utils.PlaceHolder(X=X, E=E, y=torch.zeros(y.shape[0], 0))
+        sampled = sampled.mask(node_mask, collapse=True)
+        X, E, y = sampled.X, sampled.E, sampled.y
+
+        # 准备保存链的结果
+        if keep_chain > 0:
+            final_X_chain = X[:keep_chain]
+            final_E_chain = E[:keep_chain]
+
+            chain_X[0] = final_X_chain  # 将最终的 X, E 保存到链的起始位置
+            chain_E[0] = final_E_chain
+
+            chain_X = diffusion_utils.reverse_tensor(chain_X)
+            chain_E = diffusion_utils.reverse_tensor(chain_E)
+
+            # 重复最后一帧以更好地查看最终样本
+            chain_X = torch.cat([chain_X, chain_X[-1:].repeat(10, 1, 1)], dim=0)
+            chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
+            assert chain_X.size(0) == (number_chain_steps + 11)
+
+        molecule_list = []
+        for i in range(batch_size):
+            n = n_nodes[i]
+            atom_types = X[i, :n].cpu()
+            edge_types = E[i, :n, :n].cpu()
+            molecule_list.append([atom_types, edge_types])
+
+        # 可视化链
+        if self.visualization_tools is not None:
+            self.print('Visualizing chains...')
+            current_path = os.getcwd()
+            num_molecules = chain_X.size(1)  # 分子数量
+            for i in range(num_molecules):
+                result_path = os.path.join(current_path, f'chains/{self.cfg.general.name}/'
+                                                        f'epoch{self.current_epoch}/'
+                                                        f'chains/molecule_{batch_id + i}')
+                if not os.path.exists(result_path):
+                    os.makedirs(result_path)
+                    _ = self.visualization_tools.visualize_chain(result_path,
+                                                                chain_X[:, i, :].cpu().numpy(),
+                                                                chain_E[:, i, :].cpu().numpy())
+                self.print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+            self.print('\nVisualizing molecules...')
+
+            # 可视化最终的分子
+            current_path = os.getcwd()
+            result_path = os.path.join(current_path,
+                                    f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
+            self.visualization_tools.visualize(result_path, molecule_list, save_final)
+            self.print("Done.")
+
+        return molecule_list
+
+
+    @torch.no_grad()
+    def sample_batch(self, batch_id: int, batch_size: int, keep_chain: int, number_chain_steps: int,
+                    save_final: int, num_nodes=None):  # 点和边真正的同时，只focus有效节点之间的子图
+        """
+        :param batch_id: int
+        :param batch_size: int
+        :param num_nodes: int, <int>tensor (batch_size) (optional) for specifying number of nodes
+        :param save_final: int: number of predictions to save to file
+        :param keep_chain: int: number of chains to save to file
+        :param number_chain_steps: number of timesteps to save for each chain
+        :return: molecule_list. Each element of this list is a tuple (atom_types, edge_types)
+        """
+        if num_nodes is None:
+            n_nodes = self.node_dist.sample_n(batch_size, self.device)
+        elif type(num_nodes) == int:
+            n_nodes = num_nodes * torch.ones(batch_size, device=self.device, dtype=torch.int)
+        else:
+            assert isinstance(num_nodes, torch.Tensor)
+            n_nodes = num_nodes
+
+        n_max = torch.max(n_nodes).item()
+        # 构建节点掩码
+        arange = torch.arange(n_max, device=self.device).unsqueeze(0).expand(batch_size, -1)
+        node_mask = arange < n_nodes.unsqueeze(1)
+        # 采样初始噪声  -- z_T 形状为 (batch_size, n_max, feature_dim)
+        z_T = diffusion_utils.sample_discrete_feature_noise(limit_dist=self.limit_dist, node_mask=node_mask)
+        X, E, y = z_T.X, z_T.E, z_T.y
+        assert (E == torch.transpose(E, 1, 2)).all()
+
+        # 定义链的尺寸，用于保存中间结果
+        chain_X_size = torch.Size((number_chain_steps + 1, keep_chain, X.size(1)))
+        chain_E_size = torch.Size((number_chain_steps + 1, keep_chain, E.size(1), E.size(2)))
+
+        chain_X = torch.zeros(chain_X_size, device=self.device)
+        chain_E = torch.zeros(chain_E_size, device=self.device)
+
+        # 计算每个图的有效节点数
+        valid_nodes_per_graph = n_nodes  # 形状为 (batch_size,)
+        max_node_steps = valid_nodes_per_graph.max().item()  # 最大的有效节点数
+
+        # 初始化 t_nodes 为有效节点数的张量，形状为 (batch_size,)
+        t_nodes = valid_nodes_per_graph.clone()  # 初始化为有效节点数
+
+        # 计算每个图的有效边数
+        # 在新的边添加噪声方式下，valid_edges_per_graph 不再是 (n_nodes * (n_nodes - 1)) // 2
+        # 而是根据当前的 t_nodes 计算的 t_edges，因此我们在循环中动态计算 t_edges
+
+        # 计算总的时间步数（以最大节点数为准）
+        total_steps = max_node_steps
+
+        for step in reversed(range(total_steps + 1)):
+            # 对于每个时间步，计算对应的 s_nodes 和 t_nodes
+            s_nodes = t_nodes - 1  # 形状为 (batch_size,)
+            s_nodes = torch.clamp(s_nodes, min=0)  # 保证至少为0
+
+            # 计算 t_edges 和 s_edges，使用新的计算方式
+            t_edges = t_nodes * (t_nodes - 1) // 2  # t_edges = t_nodes * (t_nodes - 1) / 2
+            s_edges = s_nodes * (s_nodes - 1) // 2
+            s_edges = torch.clamp(s_edges, min=0)  # 保证不小于0
+
+            # 计算每个图的有效节点数和有效边数
+            valid_nodes = valid_nodes_per_graph  # (batch_size,)
+            valid_edges = valid_nodes * (valid_nodes - 1) // 2 + 1e-8  # 避免除以零
+
+            # 计算归一化的 s 和 t
+            s_norm_nodes = s_nodes.float() / valid_nodes.float()
+            t_norm_nodes = t_nodes.float() / valid_nodes.float()
+
+            s_norm_edges = s_edges.float() / valid_edges.float()
+            t_norm_edges = t_edges.float() / valid_edges.float()
+
+            # 将 s 和 t 转换为张量，形状为 (batch_size, 1)
+            s_nodes_tensor = s_nodes.unsqueeze(1).float()
+            t_nodes_tensor = t_nodes.unsqueeze(1).float()
+            s_norm_nodes_tensor = s_norm_nodes.unsqueeze(1)
+            t_norm_nodes_tensor = t_norm_nodes.unsqueeze(1)
+
+            s_edges_tensor = s_edges.unsqueeze(1).float()
+            t_edges_tensor = t_edges.unsqueeze(1).float()
+            s_norm_edges_tensor = s_norm_edges.unsqueeze(1)
+            t_norm_edges_tensor = t_norm_edges.unsqueeze(1)
+
+            # 调用采样函数，从 z_t 采样 z_s
+            sampled_s, discrete_sampled_s = self.sample_p_zs_given_zt(
+                s_nodes_tensor, t_nodes_tensor, s_edges_tensor, t_edges_tensor,
+                s_norm_nodes_tensor, t_norm_nodes_tensor, s_norm_edges_tensor, t_norm_edges_tensor,
+                X, E, y, node_mask)
+
+            X, E, y = sampled_s.X, sampled_s.E, sampled_s.y
+
+            # 保存中间结果
+            write_index = t_nodes.min().item()  # 使用最小的 t_nodes 作为索引
+            if write_index < chain_X.size(0):
+                chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
+                chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
+
+            # 更新 t_nodes 和 t_edges，为下一时间步做准备
+            t_nodes = s_nodes
+            t_edges = s_edges
+
+        # 最终的采样结果
+        sampled = utils.PlaceHolder(X=X, E=E, y=torch.zeros(y.shape[0], 0))
+        sampled = sampled.mask(node_mask, collapse=True)
+        X, E, y = sampled.X, sampled.E, sampled.y
+
+        # 准备保存链的结果
+        if keep_chain > 0:
+            final_X_chain = X[:keep_chain]
+            final_E_chain = E[:keep_chain]
+
+            chain_X[0] = final_X_chain  # 将最终的 X, E 保存到链的起始位置
+            chain_E[0] = final_E_chain
+
+            chain_X = diffusion_utils.reverse_tensor(chain_X)
+            chain_E = diffusion_utils.reverse_tensor(chain_E)
+
+            # 重复最后一帧以更好地查看最终样本
+            chain_X = torch.cat([chain_X, chain_X[-1:].repeat(10, 1, 1)], dim=0)
+            chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
+            assert chain_X.size(0) == (number_chain_steps + 11)
+
+        molecule_list = []
+        for i in range(batch_size):
+            n = n_nodes[i]
+            atom_types = X[i, :n].cpu()
+            edge_types = E[i, :n, :n].cpu()
+            molecule_list.append([atom_types, edge_types])
+
+        # 可视化链
+        if self.visualization_tools is not None:
+            self.print('Visualizing chains...')
+            current_path = os.getcwd()
+            num_molecules = chain_X.size(1)  # 分子数量
+            for i in range(num_molecules):
+                result_path = os.path.join(current_path, f'chains/{self.cfg.general.name}/'
+                                                        f'epoch{self.current_epoch}/'
+                                                        f'chains/molecule_{batch_id + i}')
+                if not os.path.exists(result_path):
+                    os.makedirs(result_path)
+                    _ = self.visualization_tools.visualize_chain(result_path,
+                                                                chain_X[:, i, :].cpu().numpy(),
+                                                                chain_E[:, i, :].cpu().numpy())
+                self.print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
+            self.print('\nVisualizing molecules...')
+
+            # 可视化最终的分子
+            current_path = os.getcwd()
+            result_path = os.path.join(current_path,
+                                    f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
+            self.visualization_tools.visualize(result_path, molecule_list, save_final)
+            self.print("Done.")
+
+        return molecule_list
 
 
 
@@ -1894,9 +2689,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         extra_y = torch.cat((extra_features.y, extra_molecular_features.y), dim=-1)
 
         t_nodes = noisy_data['t_nodes']
-        # t_edges = noisy_data['t_edges']
-        # extra_y = torch.cat((extra_y, t_nodes, t_edges), dim=1)
-        extra_y = torch.cat((extra_y, t_nodes), dim=1)
+        t_edges = noisy_data['t_edges']
+        extra_y = torch.cat((extra_y, t_nodes, t_edges), dim=1)
+        #extra_y = torch.cat((extra_y, t_nodes), dim=1)
         return utils.PlaceHolder(X=extra_X, E=extra_E, y=extra_y)
 
 
@@ -2019,7 +2814,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return z_s
 
 
-    def q_s_given_0(self, s_nodes, s_edges, X, E, y, node_mask): 
+    def q_s_given_00101(self, s_nodes, s_edges, X, E, y, node_mask): #点和边同时
     
         batch_size, num_nodes, _ = X.size()
         
@@ -2134,6 +2929,380 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         E_s_final[edge_mask_noise] = F.one_hot(E_s[edge_mask_noise], num_classes=self.Edim_output).float()
 
         z_s = utils.PlaceHolder(X=X_s_final, E=E_s_final, y=y).type_as(X_s_final).mask(node_mask)
+
+        return z_s
+
+
+    def q_s_given_0010101(self, s_nodes, s_edges, X, E, y, node_mask): #点和边同时，只focus有效节点
+        """
+        给原始图添加噪声，得到 s 时刻的图。这个函数与 apply_noise 的功能类似，
+        需要根据每个图的有效节点和边数进行动态处理。
+
+        参数：
+            s_nodes: (batch_size, 1) 张量，每个图在 s 时刻的节点数。
+            s_edges: (batch_size, 1) 张量，每个图在 s 时刻的边数。
+            X: (batch_size, num_nodes, dx_in) 张量，原始节点特征的 one-hot 编码。
+            E: (batch_size, num_nodes, num_nodes, de_in) 张量，原始边特征的 one-hot 编码。
+            y: (batch_size, *) 张量，标签或其他附加数据。
+            node_mask: (batch_size, num_nodes) 张量，指示有效节点的掩码。
+
+        返回：
+            z_s: 包含加噪后的节点和边特征的占位符。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从有效节点中随机选择 s_nodes 个节点来添加噪声
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 s_nodes 个节点
+        mask_nodes = range_tensor_nodes < s_nodes
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # 对于边，首先计算每个图的有效边数
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # 形状为 (batch_size, num_nodes, num_nodes)
+
+        # 获取上三角形（不包括对角线）的索引
+        triu_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)  # (2, num_edges)
+        num_edges = triu_indices.shape[1]
+
+        # 获取每个图的有效边掩码，形状为 (batch_size, num_edges)
+        valid_edge_mask_upper = node_mask_expanded[:, triu_indices[0], triu_indices[1]]
+
+        # 在每个图中，从有效边中随机选择 s_edges 个边来添加噪声
+        rand_edges = torch.rand(batch_size, num_edges, device=device)
+        # 将无效边的分数设为 -inf，确保排序时排在最后
+        rand_edges[~valid_edge_mask_upper] = -float('inf')
+
+        # 对边的分数进行降序排序
+        sorted_scores_edges, sorted_indices_edges = torch.sort(rand_edges, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_edges)
+        range_tensor_edges = torch.arange(num_edges, device=device).unsqueeze(0).expand(batch_size, num_edges)
+
+        # 创建掩码，选择前 s_edges 个边
+        mask_edges = range_tensor_edges < s_edges
+
+        # 根据排序后的索引和掩码，创建加噪边的掩码
+        edge_mask_noise_flat = torch.zeros_like(mask_edges, dtype=torch.bool)
+        edge_mask_noise_flat.scatter_(1, sorted_indices_edges, mask_edges)
+
+        # 扩展 triu_indices，形状为 (batch_size, 2, num_edges)
+        triu_indices_exp = triu_indices.unsqueeze(0).expand(batch_size, -1, -1)
+
+        # 创建批次索引，形状为 (batch_size, num_edges)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, num_edges)
+
+        # 选取被加噪的边的索引
+        selected_rows = triu_indices_exp[:, 0, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_cols = triu_indices_exp[:, 1, :][edge_mask_noise_flat]  # (num_selected_edges,)
+        selected_batch = batch_indices[edge_mask_noise_flat]  # (num_selected_edges,)
+
+        # 初始化边的噪声掩码，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.bool, device=device)
+
+        # 设置上三角形中被加噪的边
+        edge_mask_noise[selected_batch, selected_rows, selected_cols] = True
+        # 确保边的对称性，设置对应的下三角形边
+        edge_mask_noise[selected_batch, selected_cols, selected_rows] = True
+
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_s = sampled.X  # (batch_size, num_nodes)
+        E_s = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_s_final = X.clone()
+        E_s_final = E.clone()
+
+            # 仅对加噪的节点进行更新
+        X_s_final[node_mask_noise] = F.one_hot(X_s[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_s_final[edge_mask_noise] = F.one_hot(E_s[edge_mask_noise], num_classes=self.Edim_output).float()
+        
+
+        z_s = utils.PlaceHolder(X=X_s_final, E=E_s_final, y=y).type_as(X_s_final).mask(node_mask)
+
+        return z_s
+
+    def q_s_given_001010101(self, s_nodes, s_edges, X, E, y, node_mask):  # 点和边同时，只focus有效节点之间的子图
+        """
+        给原始图添加噪声，得到 s 时刻的图。这个函数与 apply_noise 的功能类似，
+        需要根据每个图的有效节点和边数进行动态处理。
+
+        参数：
+            s_nodes: (batch_size, 1) 张量，每个图在 s 时刻的节点数。
+            s_edges: (batch_size, 1) 张量，每个图在 s 时刻的边数。
+            X: (batch_size, num_nodes, dx_in) 张量，原始节点特征的 one-hot 编码。
+            E: (batch_size, num_nodes, num_nodes, de_in) 张量，原始边特征的 one-hot 编码。
+            y: (batch_size, *) 张量，标签或其他附加数据。
+            node_mask: (batch_size, num_nodes) 张量，指示有效节点的掩码。
+
+        返回：
+            z_s: 包含加噪后的节点和边特征的占位符。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+        
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从有效节点中随机选择 s_nodes 个节点来添加噪声
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        # 将无效节点的分数设为 -inf，确保排序时排在最后
+        rand_nodes[~node_mask] = -float('inf')
+
+        # 对分数进行降序排序，获取排序后的索引
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+
+        # 创建用于比较的范围张量，形状为 (batch_size, num_nodes)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+
+        # 创建掩码，选择前 s_nodes 个节点
+        mask_nodes = range_tensor_nodes < s_nodes
+
+        # 根据排序后的索引和掩码，创建加噪节点的掩码
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # -------------------- 修改边的选择和加噪方式 --------------------
+
+        # 计算每个图的 s_edges，形状为 (batch_size,)
+        # s_edges = s_nodes * (s_nodes - 1) // 2  # 已经在外部计算，这里可不再重复
+
+        # 构建节点之间的连接关系，获取被选中节点之间的所有可能边
+        # 首先，创建节点掩码，形状为 (batch_size, num_nodes, 1) 和 (batch_size, 1, num_nodes)
+        node_mask_noise_row = node_mask_noise.unsqueeze(2)  # (batch_size, num_nodes, 1)
+        node_mask_noise_col = node_mask_noise.unsqueeze(1)  # (batch_size, 1, num_nodes)
+
+        # 计算节点之间的连接关系，形状为 (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = node_mask_noise_row & node_mask_noise_col
+
+        # 排除自环边（如果不需要自环边）
+        diag_mask = ~torch.eye(num_nodes, dtype=torch.bool, device=device).unsqueeze(0)  # (1, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & diag_mask  # (batch_size, num_nodes, num_nodes)
+
+        # 确保只考虑有效节点之间的边
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)  # (batch_size, num_nodes, num_nodes)
+        edge_mask_noise = edge_mask_noise & node_mask_expanded
+
+        # -------------------- 结束修改边的选择和加噪方式 --------------------
+
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)  # (batch_size, num_nodes, dx_out)
+
+        # 计算边的转移概率
+        probE = torch.matmul(E, Qtb.E)  # (batch_size, num_nodes, num_nodes, de_out)
+
+        current_X = X.argmax(dim=-1)  # (batch_size, num_nodes)
+        current_E = E.argmax(dim=-1)  # (batch_size, num_nodes, num_nodes)
+
+        # 确保选中的节点不会保持不变
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 确保选中的边不会保持不变
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        # 归一化
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+
+        # 对未选中的节点和边，保持原始状态
+        probX_selected[~node_mask_noise] = X[~node_mask_noise]
+        probE_selected[~edge_mask_noise] = E[~edge_mask_noise]
+
+        # 采样离散特征
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+        
+        X_s = sampled.X  # (batch_size, num_nodes)
+        E_s = sampled.E  # (batch_size, num_nodes, num_nodes)
+
+        X_s_final = X.clone()
+        E_s_final = E.clone()
+
+            # 仅对加噪的节点进行更新
+        X_s_final[node_mask_noise] = F.one_hot(X_s[node_mask_noise], num_classes=self.Xdim_output).float()
+
+        # 仅对加噪的边进行更新
+        E_s_final[edge_mask_noise] = F.one_hot(E_s[edge_mask_noise], num_classes=self.Edim_output).float()
+        
+
+        z_s = utils.PlaceHolder(X=X_s_final, E=E_s_final, y=y).type_as(X_s_final).mask(node_mask)
+
+        return z_s
+
+
+    def q_s_given_0(self, s_nodes, s_edges, X, E, y, node_mask):  # 点和边同时，只focus有效节点之间的子图，按比例选边
+        """
+        给原始图添加噪声，得到 s 时刻的图。这个函数与 apply_noise 的功能类似，
+        需要根据每个图的有效节点和边数进行动态处理。
+
+        参数：
+            s_nodes: (batch_size, 1) 张量，每个图在 s 时刻的节点数。
+            s_edges: (batch_size, 1) 张量，每个图在 s 时刻的边数。
+            X: (batch_size, num_nodes, dx_in) 张量，原始节点特征的 one-hot 编码。
+            E: (batch_size, num_nodes, num_nodes, de_in) 张量，原始边特征的 one-hot 编码。
+            y: (batch_size, *) 张量，标签或其他附加数据。
+            node_mask: (batch_size, num_nodes) 张量，指示有效节点的掩码。
+
+        返回：
+            z_s: 包含加噪后的节点和边特征的占位符。
+        """
+        batch_size, num_nodes, _ = X.size()
+        device = X.device
+
+        # 计算每个图的有效节点数，形状为 (batch_size,)
+        valid_nodes_per_graph = node_mask.sum(dim=1)  # 有效节点数量
+
+        # 在每个图中，从有效节点中随机选择 s_nodes 个节点来添加噪声
+        rand_nodes = torch.rand(batch_size, num_nodes, device=device)
+        rand_nodes[~node_mask] = -float('inf')
+        sorted_scores_nodes, sorted_indices_nodes = torch.sort(rand_nodes, dim=1, descending=True)
+        range_tensor_nodes = torch.arange(num_nodes, device=device).unsqueeze(0).expand(batch_size, num_nodes)
+        
+        mask_nodes = range_tensor_nodes < s_nodes
+        node_mask_noise = torch.zeros_like(mask_nodes, dtype=torch.bool)
+        node_mask_noise.scatter_(1, sorted_indices_nodes, mask_nodes)
+
+        # -------------------- 修改边的选择和加噪方式 --------------------
+
+        # 构建节点之间的连接关系，获取被选中节点之间的所有可能边
+        node_mask_noise_row = node_mask_noise.unsqueeze(2)
+        node_mask_noise_col = node_mask_noise.unsqueeze(1)
+        potential_edge_mask = node_mask_noise_row & node_mask_noise_col
+        diag_mask = ~torch.eye(num_nodes, dtype=torch.bool, device=device).unsqueeze(0)
+        potential_edge_mask = potential_edge_mask & diag_mask
+        node_mask_expanded = node_mask.unsqueeze(1) & node_mask.unsqueeze(2)
+        potential_edge_mask = potential_edge_mask & node_mask_expanded
+
+        triu_indices = torch.triu_indices(num_nodes, num_nodes, offset=1, device=device)
+        potential_edge_mask_upper = potential_edge_mask[:, triu_indices[0], triu_indices[1]]
+
+        # 从潜在加噪边中随机选择一部分边来添加噪声
+        edge_noise_ratio = 0.1  # 与 apply_noise 中的值一致
+        rand_edges = torch.rand(batch_size, triu_indices.size(1), device=device)
+        rand_edges[~potential_edge_mask_upper] = 2.0
+        edge_threshold = torch.quantile(rand_edges, edge_noise_ratio, dim=1, keepdim=True)
+        edge_mask_noise_flat = rand_edges <= edge_threshold
+        edge_mask_noise_flat = edge_mask_noise_flat & potential_edge_mask_upper
+
+        triu_indices_exp = triu_indices.unsqueeze(0).expand(batch_size, -1, -1)
+        batch_indices = torch.arange(batch_size, device=device).unsqueeze(1).expand(-1, triu_indices.size(1))
+
+        selected_rows = triu_indices_exp[:, 0, :][edge_mask_noise_flat]
+        selected_cols = triu_indices_exp[:, 1, :][edge_mask_noise_flat]
+        selected_batch = batch_indices[edge_mask_noise_flat]
+
+        edge_mask_noise = torch.zeros((batch_size, num_nodes, num_nodes), dtype=torch.bool, device=device)
+        edge_mask_noise[selected_batch, selected_rows, selected_cols] = True
+        edge_mask_noise[selected_batch, selected_cols, selected_rows] = True
+
+        # -------------------- 结束修改边的选择和加噪方式 --------------------
+
+        # 获取状态转移矩阵
+        Qtb = self.transition_model.get_discrete_Qt_bar(device=device)
+
+        # 计算节点的转移概率
+        probX = torch.matmul(X, Qtb.X)
+        probE = torch.matmul(E, Qtb.E)
+
+        current_X = X.argmax(dim=-1)
+        current_E = E.argmax(dim=-1)
+
+        probX_selected = probX.clone()
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise].scatter_(
+            dim=-1,
+            index=current_X[node_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        probX_selected[node_mask_noise] = probX_selected[node_mask_noise] / probX_selected[node_mask_noise].sum(dim=-1, keepdim=True)
+
+        probE_selected = probE.clone()
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise].scatter_(
+            dim=-1,
+            index=current_E[edge_mask_noise].unsqueeze(-1),
+            value=0
+        )
+        probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
+
+        probX_selected[~node_mask_noise] = X[~node_mask_noise]
+        probE_selected[~edge_mask_noise] = E[~edge_mask_noise]
+
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
+
+        X_s = sampled.X
+        E_s = sampled.E
+
+        X_s_final = X.argmax(dim=-1).clone()
+        E_s_final = E.argmax(dim=-1).clone()
+
+        X_s_final[node_mask_noise] = X_s[node_mask_noise]
+        E_s_final[edge_mask_noise] = E_s[edge_mask_noise]
+
+        X_s_onehot = F.one_hot(X_s_final, num_classes=self.Xdim_output).float()
+        E_s_onehot = F.one_hot(E_s_final, num_classes=self.Edim_output).float()
+
+        z_s = utils.PlaceHolder(X=X_s_onehot, E=E_s_onehot, y=y).type_as(X_s_onehot).mask(node_mask)
 
         return z_s
 
