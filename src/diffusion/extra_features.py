@@ -87,7 +87,6 @@ class EigenFeatures:
         mask_diag = 2 * L.shape[-1] * torch.eye(A.shape[-1]).type_as(L).unsqueeze(0)
         mask_diag = mask_diag * (~mask.unsqueeze(1)) * (~mask.unsqueeze(2))
         L = L * mask.unsqueeze(1) * mask.unsqueeze(2) + mask_diag
-
         if self.mode == 'eigenvalues':
             eigvals = torch.linalg.eigvalsh(L)        # bs, n
             eigvals = eigvals.type_as(A) / torch.sum(mask, dim=1, keepdim=True)
@@ -101,7 +100,6 @@ class EigenFeatures:
             eigvectors = eigvectors * mask.unsqueeze(2) * mask.unsqueeze(1)
             # Retrieve eigenvalues features
             n_connected_comp, batch_eigenvalues = get_eigenvalues_features(eigenvalues=eigvals)
-
             # Retrieve eigenvectors features
             nonlcc_indicator, k_lowest_eigenvector = get_eigenvectors_features(vectors=eigvectors,
                                                                                node_mask=noisy_data['node_mask'],

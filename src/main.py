@@ -109,9 +109,11 @@ def main(cfg: DictConfig):
             from datasets import qm9_dataset
             datamodule = qm9_dataset.QM9DataModule(cfg)
             dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
-            train_smiles = qm9_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
-                                                        dataset_infos=dataset_infos, evaluate_dataset=False)
-            
+            #train_smiles = qm9_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+            #                                           dataset_infos=dataset_infos, evaluate_dataset=False)
+            file_path = "/home/peizhin2/DiGress/data/qm9/qm9_pyg/train_smiles.txt"
+            with open(file_path, "r") as f:
+                train_smiles = [line.strip() for line in f.readlines()]
             """ val_smiles = qm9_dataset.get_val_smiles(cfg=cfg, val_dataloader=datamodule.val_dataloader(),
                                                         dataset_infos=dataset_infos, evaluate_dataset=False)
             test_smiles = qm9_dataset.get_test_smiles(cfg=cfg, test_dataloader=datamodule.test_dataloader(),
@@ -192,17 +194,17 @@ def main(cfg: DictConfig):
     utils.create_folders(cfg)
 
     if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion(cfg=cfg, **model_kwargs)
+        model = DiscreteDenoisingDiffusion(cfg=cfg, dataset_name=dataset_config['name'], **model_kwargs)
     else:
-        model = LiftedDenoisingDiffusion(cfg=cfg, **model_kwargs)
+        model = LiftedDenoisingDiffusion(cfg=cfg, dataset_name=dataset_config['name'], **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
         checkpoint_callback = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}",
                                               filename='{epoch}',
-                                              monitor='val/epoch_NLL',
-                                              save_top_k=5,
-                                              mode='min',
+                                              monitor='val/epoch_validity',
+                                              save_top_k=3,
+                                              mode='max',
                                               every_n_epochs=1)
         last_ckpt_save = ModelCheckpoint(dirpath=f"checkpoints/{cfg.general.name}", filename='last', every_n_epochs=1)
         callbacks.append(last_ckpt_save)

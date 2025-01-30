@@ -18,6 +18,14 @@ from src.datasets.abstract_dataset import MolecularDataModule, AbstractDatasetIn
 from src.analysis.rdkit_functions import mol2smiles, build_molecule_with_partial_charges
 from src.analysis.rdkit_functions import compute_molecular_metrics
 
+from rdkit.Chem import Descriptors, rdchem, AllChem, rdmolops
+import pickle
+import matplotlib.pyplot as plt
+from rdkit.Chem import BondType as BT
+
+import networkx as nx
+import random
+
 
 def files_exist(files) -> bool:
     # NOTE: We return `False` in case `files` is empty, leading to a
@@ -67,16 +75,29 @@ class QM9Dataset(InMemoryDataset):
         else:
             self.file_idx = 2
         self.remove_h = remove_h
+        self.ring_dict = {}
+
+        self.atom_types = {"H": 0, "C": 1, "N": 2, "O": 3, "F": 4}
+
+        self.bond_types = {BT.SINGLE:1, BT.DOUBLE:2, BT.TRIPLE:3, BT.AROMATIC:4}
+
+        self.ring_types = [
+            ("C1CCC1", 5),
+            ("C1CC1", 6),
+            ("C1CNC1", 7)
+        ]
+
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[self.file_idx])
 
+
     @property
     def raw_file_names(self):
-        return ['gdb9.sdf', 'gdb9.sdf.csv', 'uncharacterized.txt']
+        return ['qm9_v1_train.smiles', 'qm9_v1_valid.smiles', 'qm9_v1_test.smiles']
 
     @property
     def split_file_name(self):
-        return ['train.csv', 'val.csv', 'test.csv']
+        return ['qm9_v1_train.smiles', 'qm9_v1_valid.smiles', 'qm9_v1_test.smiles']
 
     @property
     def split_paths(self):
@@ -109,84 +130,206 @@ class QM9Dataset(InMemoryDataset):
             path = download_url(self.processed_url, self.raw_dir)
             extract_zip(path, self.raw_dir)
             os.unlink(path)
-
+    
         if files_exist(self.split_paths):
             return
+        
+    def build_ring_graphs(self):
+        ring_graphs = []
+        for (r_smi, r_label) in self.ring_types:
+            g = self.smiles_to_nx(r_smi, as_ring=True)
+            ring_graphs.append((g, r_label, r_smi))
+        return ring_graphs
 
-        dataset = pd.read_csv(self.raw_paths[1])
 
-        n_samples = len(dataset)
-        n_train = 100000
-        n_test = int(0.1 * n_samples)
-        n_val = n_samples - (n_train + n_test)
+    def smiles_to_nx(self, smi, as_ring=False):
+        mol = Chem.MolFromSmiles(smi)
+        if mol is None:
+            return None
+        
+        G = nx.Graph()
+        
+        for a in mol.GetAtoms():
+            idx = a.GetIdx()
+            sym = a.GetSymbol()
+            G.add_node(idx, symbol=sym)
+        
+        for b in mol.GetBonds():
+            s = b.GetBeginAtomIdx()
+            e = b.GetEndAtomIdx()
+            btype = b.GetBondType()
+            b_label = self.bond_types.get(btype, 0)
+            G.add_edge(s, e, bond_label=b_label)
+        
+        if as_ring:
+            pass
+        
+        return G
 
-        # Shuffle dataset with df.sample, then split
-        train, val, test = np.split(dataset.sample(frac=1, random_state=42), [n_train, n_val + n_train])
+    def find_subgraph_isomorphism(self, main_g, pattern_g):
+        from networkx.algorithms import isomorphism
+        
+        nm = isomorphism.GraphMatcher(
+            main_g, pattern_g,
+            node_match=self.node_eq,
+            edge_match=self.edge_eq
+        )
 
-        train.to_csv(os.path.join(self.raw_dir, 'train.csv'))
-        val.to_csv(os.path.join(self.raw_dir, 'val.csv'))
-        test.to_csv(os.path.join(self.raw_dir, 'test.csv'))
+        if nm.subgraph_is_isomorphic():
+            for sub_mapping in nm.subgraph_isomorphisms_iter():
+                
+                return True, sub_mapping
+        return False, None
+
+    def node_eq(self, n1, n2):
+        return n1.get("symbol","?") == n2.get("symbol","?")
+
+    def edge_eq(self, e1, e2):
+        return e1.get("bond_label",0) == e2.get("bond_label",0)
+
+
+    def contract_ring(self, main_g, sub_mapping, pattern_g, ring_label):
+        ring_nodes = set(sub_mapping.keys())
+        
+        external_edges = [] 
+        
+        for rn in ring_nodes:
+            for neighbor in list(main_g[rn]):
+                if neighbor not in ring_nodes:
+
+                    b_label = main_g[rn][neighbor]['bond_label']
+                    external_edges.append((rn, neighbor, b_label))
+        
+        for rn in ring_nodes:
+            main_g.remove_node(rn)
+        
+    
+        new_super_idx = self.get_new_node_id(main_g)
+        main_g.add_node(new_super_idx, symbol=f"RING_{ring_label}")
+        
+        
+        outside_map = {} 
+        for (rnode, onode, blbl) in external_edges:
+            if onode not in outside_map:
+                outside_map[onode] = blbl
+            else:
+                pass
+        
+        for out_n, b_l in outside_map.items():
+            main_g.add_edge(new_super_idx, out_n, bond_label=b_l)
+
+
+    def get_new_node_id(self, G):
+    
+        if len(G.nodes)==0:
+            return 0
+        else:
+            return max(G.nodes)+1
+
+
+
+    def contract_rings_in_order(self, G, ring_graphs):
+       
+        while True:
+            ring_found = False
+            for (rg, rlbl, r_smi) in ring_graphs:
+                ok, mapping = self.find_subgraph_isomorphism(G, rg)
+                if ok:
+                    
+                    self.contract_ring(G, mapping, rg, rlbl)
+                    ring_found = True
+                    break  
+            if not ring_found:
+                break
+        return G
+
+    def graph_to_pyg_data(self, G, idx):
+        
+        node_label_idx = []
+        
+        sorted_nodes = sorted(G.nodes())
+        node_map = {} 
+        
+        for i, n in enumerate(sorted_nodes):
+            node_map[n] = i
+        
+        for n in sorted_nodes:
+            sym = G.nodes[n].get("symbol","?")
+            if sym.startswith("RING_"):
+                
+                ring_lbl_str = sym.split("_")[1] 
+                ring_lbl = int(ring_lbl_str)
+                node_label_idx.append(ring_lbl)  
+            else:
+               
+                node_label_idx.append(self.atom_types.get(sym, 0))  
+        
+        edges = []
+        for (u,v) in G.edges():
+       
+            nu = node_map[u]
+            nv = node_map[v]
+            b_label = G[u][v].get("bond_label",0)
+        
+            edges.append((nu,nv,b_label))
+            edges.append((nv,nu,b_label))
+        
+
+        row, col, e_label = [],[],[]
+        for (uu,vv,bb) in edges:
+            row.append(uu); col.append(vv); e_label.append(bb)
+        
+        edge_index = torch.tensor([row,col], dtype=torch.long)
+        edge_label = torch.tensor(e_label, dtype=torch.long)
+        edge_attr = F.one_hot(edge_label, num_classes=5).float()  
+        
+        node_label_idx = torch.tensor(node_label_idx).long()  
+        x = F.one_hot(node_label_idx, num_classes=8).float()  
+        
+        to_keep = (node_label_idx>0)
+        edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
+                                        num_nodes=node_label_idx.size(0))
+        x = x[to_keep]
+        
+        x = x[:,1:]  
+        
+        y = torch.zeros((1,0), dtype=torch.float)
+        data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=torch.tensor([idx]))
+        return data
+
+    def process_single_smiles(self, smi, idx, ring_graphs):
+       
+        rd_mol = Chem.MolFromSmiles(smi)
+        if rd_mol is None:
+            print(f"Warning: 无法解析SMILES: {smi}")
+            return None
+        
+        
+        G = self.smiles_to_nx(smi)
+        if G is None or len(G)==0:
+            return None
+        
+      
+        G = self.contract_rings_in_order(G, ring_graphs)
+        
+ 
+        data = self.graph_to_pyg_data(G, idx)
+        return data
+
+    def process_smiles_list(self, smiles_list):
+        
+        ring_graphs = self.build_ring_graphs()  
+        data_list = []
+        for i, smi in enumerate(smiles_list):
+            d = self.process_single_smiles(smi, i, ring_graphs)
+            if d is not None:
+                data_list.append(d)
+        return data_list
 
     def process(self):
         RDLogger.DisableLog('rdApp.*')
-
-        types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
-        bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
-
-        target_df = pd.read_csv(self.split_paths[self.file_idx], index_col=0)
-        target_df.drop(columns=['mol_id'], inplace=True)
-
-        with open(self.raw_paths[-1], 'r') as f:
-            skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
-
-        suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False, sanitize=False)
-
-        data_list = []
-        for i, mol in enumerate(tqdm(suppl)):
-            if i in skip or i not in target_df.index:
-                continue
-
-            N = mol.GetNumAtoms()
-
-            type_idx = []
-            for atom in mol.GetAtoms():
-                type_idx.append(types[atom.GetSymbol()])
-
-            row, col, edge_type = [], [], []
-            for bond in mol.GetBonds():
-                start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-                row += [start, end]
-                col += [end, start]
-                edge_type += 2 * [bonds[bond.GetBondType()] + 1]
-
-            edge_index = torch.tensor([row, col], dtype=torch.long)
-            edge_type = torch.tensor(edge_type, dtype=torch.long)
-            edge_attr = F.one_hot(edge_type, num_classes=len(bonds)+1).to(torch.float)
-
-            perm = (edge_index[0] * N + edge_index[1]).argsort()
-            edge_index = edge_index[:, perm]
-            edge_attr = edge_attr[perm]
-
-            x = F.one_hot(torch.tensor(type_idx), num_classes=len(types)).float()
-            y = torch.zeros((1, 0), dtype=torch.float)
-
-            if self.remove_h:
-                type_idx = torch.tensor(type_idx).long()
-                to_keep = type_idx > 0
-                edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
-                                                 num_nodes=len(to_keep))
-                x = x[to_keep]
-                # Shift onehot encoding to match atom decoder
-                x = x[:, 1:]
-
-            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
-
-            if self.pre_filter is not None and not self.pre_filter(data):
-                continue
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
-
-            data_list.append(data)
+        smile_list = open(self.split_paths[self.file_idx]).readlines()
+        data_list = self.process_smiles_list(smile_list)
 
         torch.save(self.collate(data_list), self.processed_paths[self.file_idx])
 
@@ -218,7 +361,7 @@ class QM9DataModule(MolecularDataModule):
         super().__init__(cfg, datasets)
 
 
-class QM9infos(AbstractDatasetInfos):
+""" class QM9infos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg, recompute_statistics=False):
         self.remove_h = cfg.dataset.remove_h
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
@@ -233,9 +376,11 @@ class QM9infos(AbstractDatasetInfos):
             self.max_n_nodes = 9
             self.max_weight = 150
             self.n_nodes = torch.tensor([0, 2.2930e-05, 3.8217e-05, 6.8791e-05, 2.3695e-04, 9.7072e-04,
-                                         0.0046472, 0.023985, 0.13666, 0.83337])
+                                        0.0046472, 0.023985, 0.13666, 0.83337])
             self.node_types = torch.tensor([0.7230, 0.1151, 0.1593, 0.0026])
             self.edge_types = torch.tensor([0.7261, 0.2384, 0.0274, 0.0081, 0.0])
+
+            self.edge_consume = torch.tensor([0, 1, 2, 3, 2])
 
             super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
             self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
@@ -260,6 +405,57 @@ class QM9infos(AbstractDatasetInfos):
             super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
             self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
             self.valency_distribution[0:6] = torch.tensor([0, 0.5136, 0.0840, 0.0554, 0.3456, 0.0012])
+
+        if recompute_statistics:
+            np.set_printoptions(suppress=True, precision=5)
+            self.n_nodes = datamodule.node_counts()
+            print("Distribution of number of nodes", self.n_nodes)
+            np.savetxt('n_counts.txt', self.n_nodes.numpy())
+            self.node_types = datamodule.node_types()                                     # There are no node types
+            print("Distribution of node types", self.node_types)
+            np.savetxt('atom_types.txt', self.node_types.numpy())
+
+            self.edge_types = datamodule.edge_counts()
+            print("Distribution of edge types", self.edge_types)
+            np.savetxt('edge_types.txt', self.edge_types.numpy())
+
+            valencies = datamodule.valency_count(self.max_n_nodes)
+            print("Distribution of the valencies", valencies)
+            np.savetxt('valencies.txt', valencies.numpy())
+            self.valency_distribution = valencies
+            assert False """
+
+class QM9infos(AbstractDatasetInfos):
+    def __init__(self, datamodule, cfg, recompute_statistics=False):
+        self.remove_h = cfg.dataset.remove_h
+        self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
+
+        self.name = 'qm9'
+        if self.remove_h:
+            self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
+            self.atom_decoder = ['C', 'N', 'O', 'F']
+            self.num_atom_types = 4
+            self.valencies = [4, 3, 2, 1, 1, 1, 1] 
+            self.atom_weights = {0: 12, 1: 14, 2: 16, 3: 19, 4: 48, 5: 36, 6: 50}
+            self.max_n_nodes = 9
+            self.max_weight = 150
+
+            self.n_nodes = torch.tensor([0.0, 3.085435714946879e-05, 0.0002776892143452191, 0.0038362250722506195, 0.015468317717600355, 0.04283613250917917, 0.25470271826886487, 0.15281134617560244, 0.08154806594604601, 0.4484886507389619]) 
+            self.node_types = torch.tensor([0.6247562823485964, 0.1255464977977157, 0.1846184970156468, 0.003079396286258941, 0.028743747522090732, 0.024717993558793658, 0.008537585470897804])
+            self.edge_types = torch.tensor([0.4185789123595221, 0.44687886918882214, 0.046334704692231686, 0.021738880972721735, 0.06646863278670231]) 
+
+            self.ring_types = {"C1CCC1", "C1CC1", "C1CNC1"}
+            self.label_to_ring = {4:  "C1CCC1", 5:  "C1CC1", 6:  "C1CNC1"} 
+            self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
+            self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
+
+            self.norm_node_type = torch.tensor([0.650019170321977, 0.13862422959796372, 0.20752591371497195, 0.0038306863650873816, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
+            self.super_node_type = torch.tensor([0, 0, 0, 0, 0.29178669386517436, 0.2509200170909542, 0.08666767742202253, 0.13330944275219495, 0.07768114343996801, 0.02166691935550563, 0.07364271635907543, 0.029302716634735985, 0.02509889322288534, 0.009923779857483495])
+
+
+            super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
+            self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
+            self.valency_distribution[0: 6] = torch.tensor([2.6071e-06, 0.163, 0.352, 0.320, 0.16313, 0.00073])
 
         if recompute_statistics:
             np.set_printoptions(suppress=True, precision=5)

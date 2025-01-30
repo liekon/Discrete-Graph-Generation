@@ -107,8 +107,9 @@ class MolecularVisualization:
             AllChem.Compute2DCoords(mol)
             conf = mol.GetConformer()
             for j, atom in enumerate(mol.GetAtoms()):
-                x, y, z = coords[j]
-                conf.SetAtomPosition(j, Point3D(x, y, z))
+                if j < len(coords):
+                    x, y, z = coords[j]
+                    conf.SetAtomPosition(j, Point3D(x, y, z))
 
         # draw gif
         save_paths = []

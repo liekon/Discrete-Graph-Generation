@@ -146,6 +146,8 @@ class MarginalUniformTransition:
         self.u_x = x_marginals.unsqueeze(0).expand(self.X_classes, -1).unsqueeze(0)
         self.u_e = e_marginals.unsqueeze(0).expand(self.E_classes, -1).unsqueeze(0)
         self.u_y = torch.ones(1, self.y_classes, self.y_classes)
+        self.u_norm_x = torch.tensor([0.650019170321977, 0.13862422959796372, 0.20752591371497195, 0.0038306863650873816, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]).unsqueeze(0).expand(self.X_classes, -1).unsqueeze(0)
+        self.u_super_x = torch.tensor([0, 0, 0, 0, 0.29178669386517436, 0.2509200170909542, 0.08666767742202253, 0.13330944275219495, 0.07768114343996801, 0.02166691935550563, 0.07364271635907543, 0.029302716634735985, 0.02509889322288534, 0.009923779857483495]).unsqueeze(0).expand(self.X_classes, -1).unsqueeze(0)
         if self.y_classes > 0:
             self.u_y = self.u_y / self.y_classes
 

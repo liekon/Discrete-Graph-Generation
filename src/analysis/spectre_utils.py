@@ -850,11 +850,17 @@ class SpectreSamplingMetrics(nn.Module):
                            'sampling/frac_unique_non_iso': frac_unique_non_isomorphic,
                            'sampling/frac_unic_non_iso_valid': fraction_unique_non_isomorphic_valid,
                            'sampling/frac_non_iso': frac_non_isomorphic})
+            
 
         if local_rank == 0:
             print("Sampling statistics", to_log)
         if wandb.run:
             wandb.log(to_log, commit=False)
+
+        if 'sbm' or 'planar' in self.metrics_list:    
+            return fraction_unique_non_isomorphic_valid
+        else:
+            return None
 
     def reset(self):
         pass

@@ -239,6 +239,17 @@ class ValLossDiscrete(nn.Module):
         # true_y : tensor -- (bs, )
         # log : boolean. 
 
+        """ # -------------------- 添加新的连通性损失 --------------------
+
+        # 1. 获取有效节点掩码
+        batch_size, num_nodes, dx = masked_pred_X.size()
+        device = masked_pred_X.device
+        valid_node_mask = (masked_pred_X.sum(dim=-1) != 0)  # (bs, n)
+        # 从 masked_pred_E 中获取预测的边类型
+        pred_edge_types = torch.argmax(masked_pred_E, dim=-1)  # (bs, n, n) """
+
+
+
         true_X = torch.reshape(true_X, (-1, true_X.size(-1)))  # (bs * n, dx)
         true_E = torch.reshape(true_E, (-1, true_E.size(-1)))  # (bs * n * n, de)
         masked_pred_X = torch.reshape(masked_pred_X, (-1, masked_pred_X.size(-1)))  # (bs * n, dx)
@@ -286,7 +297,50 @@ class ValLossDiscrete(nn.Module):
         diff_edges_loss = torch.mean(diff_edges_loss.float())
         # 总的差异损失，使用一个新的lambda参数进行加权
         diff_loss =  diff_nodes_loss + diff_edges_loss
-        total_loss = loss_X + self.lambda_val[0] * loss_E + self.lambda_val[1] * loss_y + diff_loss
+
+
+
+        """ # -------------------- 添加新的连通性损失 --------------------
+        # 2. 构建邻接矩阵 A
+        # 边类型大于 0 的表示存在边（类型 1-4），等于 0 的表示无边
+        A = (pred_edge_types > 0).float()  # (bs, n, n)
+        # 3. 掩码无效节点对应的边
+        # 构建节点掩码矩阵
+        node_mask = valid_node_mask.unsqueeze(1) * valid_node_mask.unsqueeze(2)  # (bs, n, n)
+        # 掩码无效节点的边
+        A = A * node_mask  # (bs, n, n)
+
+        # 4. 构建度矩阵 D
+        degrees = A.sum(dim=-1)  # (bs, n)
+        D = torch.diag_embed(degrees)  # (bs, n, n)
+
+        # 5. 计算拉普拉斯矩阵 L
+        L = D - A  # (bs, n, n)
+
+        # 6. 计算拉普拉斯矩阵的特征值
+        eigvals = torch.linalg.eigvalsh(L)  # (bs, n)
+
+        # 7. 忽略无效节点对应的特征值
+        # 将无效节点的特征值设为一个较大的数
+        large_value = 1e6
+        valid_node_mask_float = valid_node_mask.float()
+        eigvals = eigvals * valid_node_mask_float + large_value * (1 - valid_node_mask_float)
+
+        # 8. 计算每个图的零特征值个数（即特征值小于 epsilon 的个数）
+        epsilon = 0
+        num_zero_eigvals = (eigvals == epsilon).sum(dim=1)  # (bs,)
+
+        # 9. 计算连通性损失
+        # 对于连通图，零特征值的个数应为 1，因此损失为 num_zero_eigvals - 1
+        connectivity_loss = num_zero_eigvals - 1  # (bs,)
+        # 确保损失非负
+        connectivity_loss = torch.clamp(connectivity_loss, min=0).float()
+        # 计算平均损失
+        connectivity_loss = connectivity_loss.mean() """
+
+
+
+        total_loss = loss_X + self.lambda_val[0] * loss_E + self.lambda_val[1] * loss_y + diff_loss 
 
         if log:
             to_log = {"val_loss/batch_CE": (loss_X + loss_E + loss_y).detach(),
@@ -294,10 +348,11 @@ class ValLossDiscrete(nn.Module):
                       "val_loss/E_CE": self.edge_loss.compute() if true_E.numel() > 0 else -1,
                       "val_loss/y_CE": self.y_loss.compute() if true_y.numel() > 0 else -1,
                       "val_loss/diff_loss": diff_loss.detach(),
-                      "val_loss/diff_nodes_loss": diff_nodes_loss.detach()}
+                      "val_loss/diff_nodes_loss": diff_nodes_loss.detach(),
+                      "val_loss/diff_edges_loss": diff_edges_loss.detach()}
             if wandb.run:
                 wandb.log(to_log, commit=True)
-        return loss_X + self.lambda_val[0] * loss_E + self.lambda_val[1] * loss_y + diff_loss
+        return loss_X + self.lambda_val[0] * loss_E + self.lambda_val[1] * loss_y + diff_loss 
 
     def reset(self):
         for metric in [self.node_loss, self.edge_loss, self.y_loss]:

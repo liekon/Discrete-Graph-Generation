@@ -98,9 +98,9 @@ class SamplingMolecularMetrics(nn.Module):
                 print('All smiles saved')
 
         print("Starting custom metrics")
-        self.generated_n_dist(molecules)
-        generated_n_dist = self.generated_n_dist.compute()
-        self.n_dist_mae(generated_n_dist)
+        #self.generated_n_dist(molecules)
+        #generated_n_dist = self.generated_n_dist.compute()
+        #self.n_dist_mae(generated_n_dist)
 
         self.generated_node_dist(molecules)
         generated_node_dist = self.generated_node_dist.compute()
@@ -137,7 +137,7 @@ class SamplingMolecularMetrics(nn.Module):
 
         if wandb.run:
             wandb.log(to_log, commit=False)
-            wandb.run.summary['Gen n distribution'] = generated_n_dist
+            #wandb.run.summary['Gen n distribution'] = generated_n_dist
             wandb.run.summary['Gen node distribution'] = generated_node_dist
             wandb.run.summary['Gen edge distribution'] = generated_edge_dist
             wandb.run.summary['Gen valency distribution'] = generated_valency_dist
@@ -155,6 +155,8 @@ class SamplingMolecularMetrics(nn.Module):
             textfile.writelines(valid_unique_molecules)
             textfile.close()
             print("Stability metrics:", stability, "--", rdkit_metrics[0])
+        
+        return rdkit_metrics[0][0]
 
     def reset(self):
         for metric in [self.n_dist_mae, self.node_dist_mae, self.edge_dist_mae, self.valency_dist_mae]:

@@ -62,7 +62,7 @@ def cosine_beta_schedule(timesteps, s=0.008, raise_to_power: float = 1):
     return alphas_cumprod
 
 
-""" def cosine_beta_schedule_discrete(timesteps, s=0.008):
+def cosine_beta_schedule_discrete(timesteps, s=0.008):
     Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ.
     steps = timesteps + 2
     x = np.linspace(0, steps, steps)
@@ -71,31 +71,7 @@ def cosine_beta_schedule(timesteps, s=0.008, raise_to_power: float = 1):
     alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
     alphas = (alphas_cumprod[1:] / alphas_cumprod[:-1])
     betas = 1 - alphas
-    return betas.squeeze() """
-
-def cosine_beta_schedule_discrete(timesteps, s=0.008):
-    steps = timesteps + 2
-    t = np.linspace(0, steps, steps)
-    theta = 1.008    
-    phi = 1e-8 
-    theta_t = theta ** t
-    alphas_cumprod1 = theta_t / (phi + theta_t) ** 2
-    alphas_cumprod1 = alphas_cumprod1 / alphas_cumprod1[0]
-    alphas_cumprod1 = np.clip(alphas_cumprod1, 0, 1)
-
-    alphas_cumprod2 = np.cos(0.5 * np.pi * ((t / steps) + s) / (1 + s)) ** 2
-    alphas_cumprod2 = alphas_cumprod2 / alphas_cumprod2[0]
-    alphas_cumprod2 = np.clip(alphas_cumprod2, 0, 1)
-
-    gamma = (t / steps) ** 2 
-    alphas_cumprod = gamma * alphas_cumprod2 + (1 - gamma) * alphas_cumprod1
-
-    alphas = alphas_cumprod[1:] / alphas_cumprod[:-1]
-    alphas = np.clip(alphas, 0, 1)
-    betas = 1 - alphas
-
-    return betas
-
+    return betas.squeeze()
 
 def custom_beta_schedule_discrete(timesteps, average_num_nodes=50, s=0.008):
     """ Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ. """
@@ -386,15 +362,52 @@ def posterior_distributions(X, E, y, X_t, E_t, y_t, Qt, Qsb, Qtb):
     return PlaceHolder(X=prob_X, E=prob_E, y=y_t)
 
 
-def sample_discrete_feature_noise(limit_dist, node_mask):
+def compute_adjusted_probabilities(P):
+        """
+        Compute adjusted probabilities when all elements change type and cannot remain the same.
+        P: Tensor of original probabilities (sum to 1)
+        Returns: Tensor of adjusted probabilities (sum to 1)
+        """
+        num_types = P.size(0)
+        P_adj = torch.zeros(num_types)
+        for i in range(num_types):
+            # Exclude type i
+            P_i = P[i]
+            P_not_i = P.clone()
+            P_not_i[i] = 0  # Set P(i) to zero
+            denom = 1 - P  # Denominator: 1 - P(j)
+            denom[i] = 0  # Avoid division by zero
+            # Compute terms for j != i
+            numerators = P_not_i * P_i  # P(j) * P(i)
+            denominators = denom  # 1 - P(j)
+            terms = torch.where(denominators > 0, numerators / denominators, torch.zeros_like(denominators))
+            P_adj[i] = terms.sum()
+        # Normalize to sum to 1
+        P_adj = P_adj / P_adj.sum()
+        return P_adj
+
+def get_reverse_distribution(dataset_name, limit_dist, node_mask, edge_noise_ratio):
+    bs, n_max = node_mask.shape
+    
+    node_types = limit_dist.X
+    edge_types = limit_dist.E
+
+    if dataset_name == "planar":
+        adjusted_node_types = node_types
+    else:
+        # Compute adjusted node type probabilities
+        adjusted_node_types = compute_adjusted_probabilities(node_types)
+    # Compute adjusted edge type probabilities
+    adjusted_edge_types = edge_noise_ratio * compute_adjusted_probabilities(edge_types) + (1 - edge_noise_ratio) * edge_types
+
+    node_types_reverse = adjusted_node_types.to(node_mask.device).expand(bs, n_max, -1)
+    edge_types_reverse = adjusted_edge_types.to(node_mask.device).expand(bs, n_max, n_max, -1)
+    return node_types_reverse, edge_types_reverse
+
+def sample_discrete_feature_noise(dataset_name, limit_dist, node_mask):
     """ Sample from the limit distribution of the diffusion process"""
     bs, n_max = node_mask.shape
-    x_limit = limit_dist.X[None, None, :].expand(bs, n_max, -1)
-
-    #x_limit = torch.tensor([0.2329, 0.3225, 0.4369, 0.005]).to(node_mask.device).expand(bs, n_max, -1)
-    #num_classes = limit_dist.X.size(-1)  # 获取类别数量
-    #x_limit = torch.ones(bs, n_max, num_classes, device=limit_dist.X.device) / num_classes
-    e_limit = limit_dist.E[None, None, None, :].expand(bs, n_max, n_max, -1)
+    x_limit, e_limit = get_reverse_distribution(dataset_name, limit_dist, node_mask, edge_noise_ratio=0.2)
     y_limit = limit_dist.y[None, :].expand(bs, -1)
     U_X = x_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max)
     U_E = e_limit.flatten(end_dim=-2).multinomial(1).reshape(bs, n_max, n_max)
@@ -419,5 +432,3 @@ def sample_discrete_feature_noise(limit_dist, node_mask):
     assert (U_E == torch.transpose(U_E, 1, 2)).all()
 
     return PlaceHolder(X=U_X, E=U_E, y=U_y).mask(node_mask)
-
-
