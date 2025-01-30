@@ -1,4 +1,4 @@
-# : DMol
+# DMol
 ## Environment installation
 This code was tested with PyTorch 2.0.1, cuda 11.8 and torch_geometrics 2.3.1
 
