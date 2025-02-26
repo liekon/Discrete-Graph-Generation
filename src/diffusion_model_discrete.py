@@ -1428,10 +1428,6 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         t_edges = selected_edge_count  # (batch_size,) """
 
 
-
-
-
-
         Qtb = self.transition_model.get_discrete_Qt_bar(device=device)
         probX = torch.matmul(X, Qtb.X)
         probE = torch.matmul(E, Qtb.E)
@@ -3884,12 +3880,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         X, E, y = z_T.X, z_T.E, z_T.y
         assert (E == torch.transpose(E, 1, 2)).all()
 
-        """ # 定义链的尺寸，用于保存中间结果
+        # 定义链的尺寸，用于保存中间结果
         chain_X_size = torch.Size((number_chain_steps + 1, keep_chain, X.size(1)))
         chain_E_size = torch.Size((number_chain_steps + 1, keep_chain, E.size(1), E.size(2)))
 
         chain_X = torch.zeros(chain_X_size, device=self.device)
-        chain_E = torch.zeros(chain_E_size, device=self.device) """
+        chain_E = torch.zeros(chain_E_size, device=self.device)
 
         """ # 计算每个图的有效节点数
         valid_nodes_per_graph = n_nodes  # 形状为 (batch_size,)
@@ -4062,10 +4058,10 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             # 保存中间结果
             # 使用真实步数索引，而非扩展步数索引
             # write_index 应该使用 t_nodes_real 的最小值，而非 t_nodes
-            """ write_index = t_nodes_real.min().item()
+            write_index = t_nodes_real.min().item()
             if write_index < chain_X.size(0):
                 chain_X[write_index] = discrete_sampled_s.X[:keep_chain]
-                chain_E[write_index] = discrete_sampled_s.E[:keep_chain] """
+                chain_E[write_index] = discrete_sampled_s.E[:keep_chain]
 
             # 更新 t_nodes, t_edges (扩展坐标)
             t_nodes = s_nodes
@@ -4078,7 +4074,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         X, E, y = sampled.X, sampled.E, sampled.y
 
         #molecule_list, X, E= self.convert_feature_with_supernode(X,E,n_nodes,self.dataset_info.ring_types)
-        X, E, molecule_list = self.build_molecule_list(X, E, n_nodes)
+        #X, E, molecule_list = self.build_molecule_list(X, E, n_nodes)
 
         # 定义链的尺寸，用于保存中间结果
         chain_X_size = torch.Size((number_chain_steps + 1, keep_chain, X.size(1)))
@@ -4103,12 +4099,12 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             chain_E = torch.cat([chain_E, chain_E[-1:].repeat(10, 1, 1, 1)], dim=0)
             assert chain_X.size(0) == (number_chain_steps + 11)
 
-        """ molecule_list = []
+        molecule_list = []
         for i in range(batch_size):
             n = n_nodes[i]
             atom_types = X[i, :n].cpu()
             edge_types = E[i, :n, :n].cpu()
-            molecule_list.append([atom_types, edge_types]) """
+            molecule_list.append([atom_types, edge_types])
 
         # 可视化链
         if self.visualization_tools is not None:
