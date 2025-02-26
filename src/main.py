@@ -69,7 +69,7 @@ def get_resume_adaptive(cfg, model_kwargs):
 def main(cfg: DictConfig):
     dataset_config = cfg["dataset"]
 
-    if dataset_config["name"] in ['sbm', 'comm20', 'planar']:
+    """ if dataset_config["name"] in ['sbm', 'comm20', 'planar']:
         from datasets.spectre_dataset import SpectreGraphDataModule, SpectreDatasetInfos
         from analysis.spectre_utils import PlanarSamplingMetrics, SBMSamplingMetrics, Comm20SamplingMetrics
         from analysis.visualization import NonMolecularVisualization
@@ -97,9 +97,9 @@ def main(cfg: DictConfig):
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
                         'sampling_metrics': sampling_metrics, 'visualization_tools': visualization_tools,
-                        'extra_features': extra_features, 'domain_features': domain_features}
+                        'extra_features': extra_features, 'domain_features': domain_features} """
 
-    elif dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
+    if dataset_config["name"] in ['qm9', 'guacamol', 'moses']:
         from metrics.molecular_metrics import TrainMolecularMetrics, SamplingMolecularMetrics
         from metrics.molecular_metrics_discrete import TrainMolecularMetricsDiscrete
         from diffusion.extra_features_molecular import ExtraMolecularFeatures
@@ -109,37 +109,8 @@ def main(cfg: DictConfig):
             from datasets import qm9_dataset
             datamodule = qm9_dataset.QM9DataModule(cfg)
             dataset_infos = qm9_dataset.QM9infos(datamodule=datamodule, cfg=cfg)
-            #train_smiles = qm9_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
-            #                                           dataset_infos=dataset_infos, evaluate_dataset=False)
-            file_path = "/home/peizhin2/DiGress/data/qm9/qm9_pyg/train_smiles.txt"
-            with open(file_path, "r") as f:
-                train_smiles = [line.strip() for line in f.readlines()]
-            """ val_smiles = qm9_dataset.get_val_smiles(cfg=cfg, val_dataloader=datamodule.val_dataloader(),
-                                                        dataset_infos=dataset_infos, evaluate_dataset=False)
-            test_smiles = qm9_dataset.get_test_smiles(cfg=cfg, test_dataloader=datamodule.test_dataloader(),
-                                                        dataset_infos=dataset_infos, evaluate_dataset=False)
-
-            file_path = '/home/peizhin2/DiGress/data/qm9/qm9_pyg/train_smiles.txt'
-            # 打开文件并写入 SMILES
-            with open(file_path, 'w') as f:
-                for smi in train_smiles:
-                    f.write(smi + '\n')
-            print(f"成功将 {len(train_smiles)} 个 SMILES 保存到 {file_path}")
-
-            file_path = '/home/peizhin2/DiGress/data/qm9/qm9_pyg/val_smiles.txt'
-            # 打开文件并写入 SMILES
-            with open(file_path, 'w') as f:
-                for smi in val_smiles:
-                    f.write(smi + '\n')
-            print(f"成功将 {len(val_smiles)} 个 SMILES 保存到 {file_path}")
-
-            file_path = '/home/peizhin2/DiGress/data/qm9/qm9_pyg/test_smiles.txt'
-            # 打开文件并写入 SMILES
-            with open(file_path, 'w') as f:
-                for smi in test_smiles:
-                    f.write(smi + '\n')
-            print(f"成功将 {len(test_smiles)} 个 SMILES 保存到 {file_path}")
-            exit() """
+            train_smiles = qm9_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+                           dataset_infos=dataset_infos, evaluate_dataset=False)
             
 
             

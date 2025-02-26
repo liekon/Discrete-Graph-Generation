@@ -58,7 +58,7 @@ class SelectHOMOTransform:
         return data
 
 
-class QM9Dataset(InMemoryDataset):
+""" class QM9Dataset(InMemoryDataset):
     raw_url = ('https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/'
                'molnet_publish/qm9.zip')
     raw_url2 = 'https://ndownloader.figshare.com/files/3195404'
@@ -101,8 +101,7 @@ class QM9Dataset(InMemoryDataset):
 
     @property
     def split_paths(self):
-        r"""The absolute filepaths that must be present in order to skip
-        splitting."""
+
         files = to_list(self.split_file_name)
         return [osp.join(self.raw_dir, f) for f in files]
 
@@ -114,9 +113,7 @@ class QM9Dataset(InMemoryDataset):
             return ['proc_tr_h.pt', 'proc_val_h.pt', 'proc_test_h.pt']
 
     def download(self):
-        """
-        Download raw qm9 files. Taken from PyG QM9 class
-        """
+
         try:
             import rdkit  # noqa
             file_path = download_url(self.raw_url, self.raw_dir)
@@ -331,8 +328,147 @@ class QM9Dataset(InMemoryDataset):
         smile_list = open(self.split_paths[self.file_idx]).readlines()
         data_list = self.process_smiles_list(smile_list)
 
-        torch.save(self.collate(data_list), self.processed_paths[self.file_idx])
+        torch.save(self.collate(data_list), self.processed_paths[self.file_idx]) """
 
+class QM9Dataset(InMemoryDataset):
+    raw_url = ('https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/'
+               'molnet_publish/qm9.zip')
+    raw_url2 = 'https://ndownloader.figshare.com/files/3195404'
+    processed_url = 'https://data.pyg.org/datasets/qm9_v3.zip'
+
+    def __init__(self, stage, root, remove_h: bool, target_prop=None,
+                 transform=None, pre_transform=None, pre_filter=None):
+        self.target_prop = target_prop
+        self.stage = stage
+        if self.stage == 'train':
+            self.file_idx = 0
+        elif self.stage == 'val':
+            self.file_idx = 1
+        else:
+            self.file_idx = 2
+        self.remove_h = remove_h
+        super().__init__(root, transform, pre_transform, pre_filter)
+        self.data, self.slices = torch.load(self.processed_paths[self.file_idx])
+
+    @property
+    def raw_file_names(self):
+        return ['gdb9.sdf', 'gdb9.sdf.csv', 'uncharacterized.txt']
+
+    @property
+    def split_file_name(self):
+        return ['train.csv', 'val.csv', 'test.csv']
+
+    @property
+    def split_paths(self):
+        r"""The absolute filepaths that must be present in order to skip
+        splitting."""
+        files = to_list(self.split_file_name)
+        return [osp.join(self.raw_dir, f) for f in files]
+
+    @property
+    def processed_file_names(self):
+        if self.remove_h:
+            return ['proc_tr_no_h.pt', 'proc_val_no_h.pt', 'proc_test_no_h.pt']
+        else:
+            return ['proc_tr_h.pt', 'proc_val_h.pt', 'proc_test_h.pt']
+
+    def download(self):
+        """
+        Download raw qm9 files. Taken from PyG QM9 class
+        """
+        try:
+            import rdkit  # noqa
+            file_path = download_url(self.raw_url, self.raw_dir)
+            extract_zip(file_path, self.raw_dir)
+            os.unlink(file_path)
+
+            file_path = download_url(self.raw_url2, self.raw_dir)
+            os.rename(osp.join(self.raw_dir, '3195404'),
+                      osp.join(self.raw_dir, 'uncharacterized.txt'))
+        except ImportError:
+            path = download_url(self.processed_url, self.raw_dir)
+            extract_zip(path, self.raw_dir)
+            os.unlink(path)
+
+        if files_exist(self.split_paths):
+            return
+
+        dataset = pd.read_csv(self.raw_paths[1])
+
+        n_samples = len(dataset)
+        n_train = 100000
+        n_test = int(0.1 * n_samples)
+        n_val = n_samples - (n_train + n_test)
+
+        # Shuffle dataset with df.sample, then split
+        train, val, test = np.split(dataset.sample(frac=1, random_state=42), [n_train, n_val + n_train])
+
+        train.to_csv(os.path.join(self.raw_dir, 'train.csv'))
+        val.to_csv(os.path.join(self.raw_dir, 'val.csv'))
+        test.to_csv(os.path.join(self.raw_dir, 'test.csv'))
+
+    def process(self):
+        RDLogger.DisableLog('rdApp.*')
+
+        types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
+        bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
+
+        target_df = pd.read_csv(self.split_paths[self.file_idx], index_col=0)
+        target_df.drop(columns=['mol_id'], inplace=True)
+
+        with open(self.raw_paths[-1], 'r') as f:
+            skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
+
+        suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False, sanitize=False)
+
+        data_list = []
+        for i, mol in enumerate(tqdm(suppl)):
+            if i in skip or i not in target_df.index:
+                continue
+
+            N = mol.GetNumAtoms()
+
+            type_idx = []
+            for atom in mol.GetAtoms():
+                type_idx.append(types[atom.GetSymbol()])
+
+            row, col, edge_type = [], [], []
+            for bond in mol.GetBonds():
+                start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
+                row += [start, end]
+                col += [end, start]
+                edge_type += 2 * [bonds[bond.GetBondType()] + 1]
+
+            edge_index = torch.tensor([row, col], dtype=torch.long)
+            edge_type = torch.tensor(edge_type, dtype=torch.long)
+            edge_attr = F.one_hot(edge_type, num_classes=len(bonds)+1).to(torch.float)
+
+            perm = (edge_index[0] * N + edge_index[1]).argsort()
+            edge_index = edge_index[:, perm]
+            edge_attr = edge_attr[perm]
+
+            x = F.one_hot(torch.tensor(type_idx), num_classes=len(types)).float()
+            y = torch.zeros((1, 0), dtype=torch.float)
+
+            if self.remove_h:
+                type_idx = torch.tensor(type_idx).long()
+                to_keep = type_idx > 0
+                edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
+                                                 num_nodes=len(to_keep))
+                x = x[to_keep]
+                # Shift onehot encoding to match atom decoder
+                x = x[:, 1:]
+
+            data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
+
+            if self.pre_filter is not None and not self.pre_filter(data):
+                continue
+            if self.pre_transform is not None:
+                data = self.pre_transform(data)
+
+            data_list.append(data)
+
+        torch.save(self.collate(data_list), self.processed_paths[self.file_idx])
 
 class QM9DataModule(MolecularDataModule):
     def __init__(self, cfg):
@@ -361,7 +497,7 @@ class QM9DataModule(MolecularDataModule):
         super().__init__(cfg, datasets)
 
 
-""" class QM9infos(AbstractDatasetInfos):
+class QM9infos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg, recompute_statistics=False):
         self.remove_h = cfg.dataset.remove_h
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
@@ -423,9 +559,9 @@ class QM9DataModule(MolecularDataModule):
             print("Distribution of the valencies", valencies)
             np.savetxt('valencies.txt', valencies.numpy())
             self.valency_distribution = valencies
-            assert False """
+            assert False
 
-class QM9infos(AbstractDatasetInfos):
+""" class QM9infos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg, recompute_statistics=False):
         self.remove_h = cfg.dataset.remove_h
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
@@ -474,7 +610,7 @@ class QM9infos(AbstractDatasetInfos):
             print("Distribution of the valencies", valencies)
             np.savetxt('valencies.txt', valencies.numpy())
             self.valency_distribution = valencies
-            assert False
+            assert False """
 
 
 def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=False):
