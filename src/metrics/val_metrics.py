@@ -162,32 +162,32 @@ class ValLoss(nn.Module):
         loss_y = self.y_loss(pred_y, true_y) if true_y.numel() > 0 else 0.0
 
         
-        # 将噪声图和预测图展平
+
         noisy_X = torch.reshape(noisy_X_t, (-1, noisy_X_t.size(-1)))  # (bs * n, dx)
         #noisy_E = torch.reshape(noisy_E_t, (-1, noisy_E_t.size(-1)))  # (bs * n * n, de)
-        # 只保留未被掩码的行
+
         noisy_X = noisy_X[mask_X, :]
         #noisy_E = noisy_E[mask_E, :]
 
-        # 获取预测图和噪声图的标签
+
         pred_labels_X = torch.argmax(flat_pred_X, dim=-1)
         noisy_labels_X = torch.argmax(noisy_X, dim=-1)
 
         #pred_labels_E = torch.argmax(flat_pred_E, dim=-1)
         #noisy_labels_E = torch.argmax(noisy_E, dim=-1)
 
-        # 计算预测图和噪声图之间标签不同的节点和边的数量
+
         diff_nodes = (pred_labels_X != noisy_labels_X).sum()
         #diff_edges = (pred_labels_E != noisy_labels_E).sum()
         
-        # 计算差异数量的损失
+
         diff_nodes_loss = (diff_nodes - t) ** 2
         #t_edges = ((masked_pred_X.shape[1] - 1) * t) // 2
         #diff_edges_loss = (diff_edges - t_edges) ** 2
 
         diff_nodes_loss = torch.mean(diff_nodes_loss.float())
         #diff_edges_loss = torch.mean(diff_edges_loss.float())
-        # 总的差异损失，使用一个新的lambda参数进行加权
+
         diff_loss =  diff_nodes_loss #+ 5 * diff_edges_loss
         total_loss = loss_X + self.lambda_val[0] * loss_E + self.lambda_val[1] * loss_y + diff_loss
 
@@ -239,15 +239,6 @@ class ValLossDiscrete(nn.Module):
         # true_y : tensor -- (bs, )
         # log : boolean. 
 
-        """ # -------------------- 添加新的连通性损失 --------------------
-
-        # 1. 获取有效节点掩码
-        batch_size, num_nodes, dx = masked_pred_X.size()
-        device = masked_pred_X.device
-        valid_node_mask = (masked_pred_X.sum(dim=-1) != 0)  # (bs, n)
-        # 从 masked_pred_E 中获取预测的边类型
-        pred_edge_types = torch.argmax(masked_pred_E, dim=-1)  # (bs, n, n) """
-
 
 
         true_X = torch.reshape(true_X, (-1, true_X.size(-1)))  # (bs * n, dx)
@@ -270,73 +261,32 @@ class ValLossDiscrete(nn.Module):
         loss_y = self.y_loss(pred_y, true_y) if true_y.numel() > 0 else 0.0
 
         
-        # 将噪声图和预测图展平
+
         noisy_X = torch.reshape(noisy_X_t, (-1, noisy_X_t.size(-1)))  # (bs * n, dx)
         noisy_E = torch.reshape(noisy_E_t, (-1, noisy_E_t.size(-1)))  # (bs * n * n, de)
-        # 只保留未被掩码的行
+
         noisy_X = noisy_X[mask_X, :]
         noisy_E = noisy_E[mask_E, :]
 
-        # 获取预测图和噪声图的标签
         pred_labels_X = torch.argmax(flat_pred_X, dim=-1)
         noisy_labels_X = torch.argmax(noisy_X, dim=-1)
 
         pred_labels_E = torch.argmax(flat_pred_E, dim=-1)
         noisy_labels_E = torch.argmax(noisy_E, dim=-1)
 
-        # 计算预测图和噪声图之间标签不同的节点和边的数量
+
         diff_nodes = (pred_labels_X != noisy_labels_X).sum()
         diff_edges = (pred_labels_E != noisy_labels_E).sum()
         
-        # 计算差异数量的损失
+
         diff_nodes_loss = (diff_nodes - t) ** 2
         #t_edges = ((masked_pred_X.shape[1] - 1) * t) // 2
         diff_edges_loss = (diff_edges - t_e) ** 2
 
         diff_nodes_loss = torch.mean(diff_nodes_loss.float()) 
         diff_edges_loss = torch.mean(diff_edges_loss.float())
-        # 总的差异损失，使用一个新的lambda参数进行加权
+
         diff_loss =  diff_nodes_loss + diff_edges_loss
-
-
-
-        """ # -------------------- 添加新的连通性损失 --------------------
-        # 2. 构建邻接矩阵 A
-        # 边类型大于 0 的表示存在边（类型 1-4），等于 0 的表示无边
-        A = (pred_edge_types > 0).float()  # (bs, n, n)
-        # 3. 掩码无效节点对应的边
-        # 构建节点掩码矩阵
-        node_mask = valid_node_mask.unsqueeze(1) * valid_node_mask.unsqueeze(2)  # (bs, n, n)
-        # 掩码无效节点的边
-        A = A * node_mask  # (bs, n, n)
-
-        # 4. 构建度矩阵 D
-        degrees = A.sum(dim=-1)  # (bs, n)
-        D = torch.diag_embed(degrees)  # (bs, n, n)
-
-        # 5. 计算拉普拉斯矩阵 L
-        L = D - A  # (bs, n, n)
-
-        # 6. 计算拉普拉斯矩阵的特征值
-        eigvals = torch.linalg.eigvalsh(L)  # (bs, n)
-
-        # 7. 忽略无效节点对应的特征值
-        # 将无效节点的特征值设为一个较大的数
-        large_value = 1e6
-        valid_node_mask_float = valid_node_mask.float()
-        eigvals = eigvals * valid_node_mask_float + large_value * (1 - valid_node_mask_float)
-
-        # 8. 计算每个图的零特征值个数（即特征值小于 epsilon 的个数）
-        epsilon = 0
-        num_zero_eigvals = (eigvals == epsilon).sum(dim=1)  # (bs,)
-
-        # 9. 计算连通性损失
-        # 对于连通图，零特征值的个数应为 1，因此损失为 num_zero_eigvals - 1
-        connectivity_loss = num_zero_eigvals - 1  # (bs,)
-        # 确保损失非负
-        connectivity_loss = torch.clamp(connectivity_loss, min=0).float()
-        # 计算平均损失
-        connectivity_loss = connectivity_loss.mean() """
 
 
 

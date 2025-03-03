@@ -63,7 +63,7 @@ def cosine_beta_schedule(timesteps, s=0.008, raise_to_power: float = 1):
 
 
 def cosine_beta_schedule_discrete(timesteps, s=0.008):
-    Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ.
+    """ Cosine schedule as proposed in https://openreview.net/forum?id=-NEXDKk8gZ. """
     steps = timesteps + 2
     x = np.linspace(0, steps, steps)
 

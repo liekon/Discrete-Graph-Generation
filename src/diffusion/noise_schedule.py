@@ -193,13 +193,13 @@ class MarginalUniformTransition:
         alpha_bar_t: (bs)         Product of the (1 - beta_t) for each time step from 0 to t.
         returns: qx (bs, dx, dx), qe (bs, de, de), qy (bs, dy, dy).
         """
-        q_x = 0.5 * torch.eye(self.X_classes, device=device).unsqueeze(0) + 0.5 * self.u_x.to(device)
-        q_e = 0.5 * torch.eye(self.E_classes, device=device).unsqueeze(0) + 0.5 * self.u_e.to(device)
-        q_y = 0.5 * torch.eye(self.y_classes, device=device).unsqueeze(0) + 0.5 * self.u_y.to(device)
+        #q_x = 0.5 * torch.eye(self.X_classes, device=device).unsqueeze(0) + 0.5 * self.u_x.to(device)
+        #q_e = 0.5 * torch.eye(self.E_classes, device=device).unsqueeze(0) + 0.5 * self.u_e.to(device)
+        #q_y = 0.5 * torch.eye(self.y_classes, device=device).unsqueeze(0) + 0.5 * self.u_y.to(device)
 
-        #q_x = self.u_x.to(device)
-        #q_e = self.u_e.to(device)
-        #q_y = self.u_y.to(device)
+        q_x = self.u_x.to(device)
+        q_e = self.u_e.to(device)
+        q_y = self.u_y.to(device)
         return utils.PlaceHolder(X=q_x, E=q_e, y=q_y)
 
 

@@ -360,8 +360,6 @@ class QM9Dataset(InMemoryDataset):
 
     @property
     def split_paths(self):
-        r"""The absolute filepaths that must be present in order to skip
-        splitting."""
         files = to_list(self.split_file_name)
         return [osp.join(self.raw_dir, f) for f in files]
 
@@ -373,9 +371,6 @@ class QM9Dataset(InMemoryDataset):
             return ['proc_tr_h.pt', 'proc_val_h.pt', 'proc_test_h.pt']
 
     def download(self):
-        """
-        Download raw qm9 files. Taken from PyG QM9 class
-        """
         try:
             import rdkit  # noqa
             file_path = download_url(self.raw_url, self.raw_dir)
