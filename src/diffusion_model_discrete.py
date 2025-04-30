@@ -1347,7 +1347,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             )
             probE_selected[edge_mask_noise] = probE_selected[edge_mask_noise] / probE_selected[edge_mask_noise].sum(dim=-1, keepdim=True)
 
-        sampled = diffusion_utils.sample_discrete_features(self.dataset_name, self.limit_dist, probX_selected, probE_selected, node_mask)
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
         X_t = sampled.X
         E_t = sampled.E
 
@@ -3997,7 +3997,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         probX_selected[~node_mask_noise] = X[~node_mask_noise]
         probE_selected[~edge_mask_noise] = E[~edge_mask_noise]
 
-        sampled = diffusion_utils.sample_discrete_features(self.dataset_name, self.limit_dist, probX_selected, probE_selected, node_mask)
+        sampled = diffusion_utils.sample_discrete_features(self.limit_dist, probX_selected, probE_selected, node_mask)
 
         X_s = sampled.X
         E_s = sampled.E
