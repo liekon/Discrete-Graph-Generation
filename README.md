@@ -26,10 +26,6 @@ This code was tested with PyTorch 2.0.1, cuda 11.8 and torch_geometrics 2.3.1
     
     ```pip install -r requirements.txt```
 
-  - Run:
-    
-    ```pip install -e .```
-
   - Navigate to the ./src/analysis/orca directory and compile orca.cpp: 
     
      ```g++ -O2 -std=c++11 -o orca orca.cpp```
