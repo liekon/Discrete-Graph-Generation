@@ -9,12 +9,12 @@ import math
 from models.transformer_model import GraphTransformer
 from diffusion.noise_schedule import DiscreteUniformTransition, PredefinedNoiseScheduleDiscrete,\
     MarginalUniformTransition
-from src.diffusion import diffusion_utils
+from diffusion import diffusion_utils
 from metrics.train_metrics import TrainLossDiscrete
 from metrics.val_metrics import ValLossDiscrete
 from metrics.test_metrics import TestLossDiscrete
 from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchKL, NLL
-from src import utils
+import utils
 import networkx as nx
 import random
 from rdkit.Chem import rdchem

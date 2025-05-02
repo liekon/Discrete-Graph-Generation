@@ -13,10 +13,10 @@ import pandas as pd
 from torch_geometric.data import Data, InMemoryDataset, download_url, extract_zip
 from torch_geometric.utils import subgraph
 
-import src.utils as utils
-from src.datasets.abstract_dataset import MolecularDataModule, AbstractDatasetInfos
-from src.analysis.rdkit_functions import mol2smiles, build_molecule_with_partial_charges
-from src.analysis.rdkit_functions import compute_molecular_metrics
+import utils as utils
+from datasets.abstract_dataset import MolecularDataModule, AbstractDatasetInfos
+from analysis.rdkit_functions import mol2smiles, build_molecule_with_partial_charges
+from analysis.rdkit_functions import compute_molecular_metrics
 
 from rdkit.Chem import Descriptors, rdchem, AllChem, rdmolops
 import pickle

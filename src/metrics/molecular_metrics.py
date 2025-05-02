@@ -2,7 +2,7 @@ from rdkit import Chem
 from torchmetrics import MeanSquaredError, MeanAbsoluteError
 
 ### packages for visualization
-from src.analysis.rdkit_functions import compute_molecular_metrics
+from analysis.rdkit_functions import compute_molecular_metrics
 import torch
 from torchmetrics import Metric, MetricCollection
 from torch import Tensor

@@ -4,7 +4,7 @@ import torch.nn as nn
 from torchmetrics import Metric, MeanSquaredError, MetricCollection
 import time
 import wandb
-from src.metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchMSE, SumExceptBatchKL, CrossEntropyMetric, \
+from metrics.abstract_metrics import SumExceptBatchMetric, SumExceptBatchMSE, SumExceptBatchKL, CrossEntropyMetric, \
     ProbabilityMetric, NLL
 
 
