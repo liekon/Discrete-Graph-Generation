@@ -525,7 +525,7 @@ class QM9infos(AbstractDatasetInfos):
         assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types和ring_weights长度必须一致"
         
         # 基础原子类型（无H）
-            self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
+        self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
         base_atom_decoder = ['C', 'N', 'O', 'F']
         base_valencies = [4, 3, 2, 1]
         base_atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
@@ -550,8 +550,8 @@ class QM9infos(AbstractDatasetInfos):
             self.label_to_ring[base_label + i] = ring_smiles
         
         # 固定映射
-                self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
-                self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
+        self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
+        self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
 
         # 从config读取统计信息文件路径
         self.statistics_file = getattr(cfg.dataset, 'statistics_after_4', 'data/qm9/qm9_pyg/statistics_after_compression.json')
@@ -855,7 +855,7 @@ def compute_qm9_smiles(atom_decoder, train_dataloader, remove_h):
             # 但这种情况不应该发生，因为我们在 process() 中已经保存了
             print(f"Warning: data at index {i} does not have smiles attribute, falling back to decompression")
             # 这里需要解压缩逻辑，但为了简化，我们跳过这个样本
-                invalid += 1
+            invalid += 1
 
         if i % 1000 == 0:
             print("\tConverting QM9 dataset to SMILES {0:.2%}".format(float(i) / len_train))
