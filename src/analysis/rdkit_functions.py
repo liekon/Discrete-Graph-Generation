@@ -3,7 +3,9 @@ import torch
 import re
 import wandb
 try:
-    from rdkit import Chem
+    from rdkit import Chem, RDLogger
+    # 禁用 RDKit 的警告输出
+    RDLogger.DisableLog('rdApp.*')
     print("Found rdkit, all good")
 except ModuleNotFoundError as e:
     use_rdkit = False

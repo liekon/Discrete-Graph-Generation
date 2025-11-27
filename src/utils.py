@@ -8,17 +8,23 @@ import wandb
 
 
 def create_folders(args):
+    # 获取可视化目录，如果没有配置则使用默认路径
+    vis_dir = getattr(args.general, 'visualization_dir', None)
+    if vis_dir is None:
+        vis_dir = os.getcwd()
+    
+    graphs_dir = os.path.join(vis_dir, 'graphs')
+    chains_dir = os.path.join(vis_dir, 'chains')
+    
     try:
-        # os.makedirs('checkpoints')
-        os.makedirs('graphs')
-        os.makedirs('chains')
+        os.makedirs(graphs_dir, exist_ok=True)
+        os.makedirs(chains_dir, exist_ok=True)
     except OSError:
         pass
 
     try:
-        # os.makedirs('checkpoints/' + args.general.name)
-        os.makedirs('graphs/' + args.general.name)
-        os.makedirs('chains/' + args.general.name)
+        os.makedirs(os.path.join(graphs_dir, args.general.name), exist_ok=True)
+        os.makedirs(os.path.join(chains_dir, args.general.name), exist_ok=True)
     except OSError:
         pass
 

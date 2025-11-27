@@ -7,8 +7,8 @@ import torch.nn as nn
 
 class CEPerClass(Metric):
     full_state_update = False
-    def __init__(self, class_id):
-        super().__init__()
+    def __init__(self, class_id, name=None):
+        super().__init__(name=name)
         self.class_id = class_id
         self.add_state('total_ce', default=torch.tensor(0.), dist_reduce_fx="sum")
         self.add_state('total_samples', default=torch.tensor(0.), dist_reduce_fx="sum")
@@ -128,6 +128,12 @@ class AromaticCE(CEPerClass):
         super().__init__(i)
 
 
+class RingCE(CEPerClass):
+    """用于超节点（压缩的环）的交叉熵指标"""
+    def __init__(self, i, name=None):
+        super().__init__(i, name=name)
+
+
 class AtomMetricsCE(MetricCollection):
     def __init__(self, dataset_infos):
         atom_decoder = dataset_infos.atom_decoder
@@ -136,10 +142,19 @@ class AtomMetricsCE(MetricCollection):
                       'Br': BrCE, 'Cl': ClCE, 'I': IodineCE, 'P': PhosphorusCE, 'S': SulfurCE, 'Se': SeCE,
                       'Si': SiCE}
 
-        metrics_list = []
+        # 使用字典方式传递 metrics，键作为名称，避免名称冲突
+        metrics_dict = {}
         for i, atom_type in enumerate(atom_decoder):
-            metrics_list.append(class_dict[atom_type](i))
-        super().__init__(metrics_list)
+            # 处理超节点类型（以 'RING_' 开头）
+            if atom_type.startswith('RING_'):
+                # 为每个超节点类型设置唯一名称，避免 MetricCollection 中的名称冲突
+                metrics_dict[f'RingCE_{atom_type}'] = RingCE(i)
+            elif atom_type in class_dict:
+                metrics_dict[atom_type] = class_dict[atom_type](i)
+            else:
+                # 对于未知类型，使用通用的 CEPerClass，也设置唯一名称
+                metrics_dict[f'CEPerClass_{atom_type}'] = CEPerClass(i)
+        super().__init__(metrics_dict)
 
 
 class BondMetricsCE(MetricCollection):

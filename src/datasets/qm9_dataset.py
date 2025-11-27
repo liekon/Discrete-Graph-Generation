@@ -25,6 +25,7 @@ from rdkit.Chem import BondType as BT
 
 import networkx as nx
 import random
+from omegaconf import OmegaConf
 
 
 def files_exist(files) -> bool:
@@ -58,14 +59,14 @@ class SelectHOMOTransform:
         return data
 
 
-""" class QM9Dataset(InMemoryDataset):
+class QM9Dataset(InMemoryDataset):
     raw_url = ('https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/'
                'molnet_publish/qm9.zip')
     raw_url2 = 'https://ndownloader.figshare.com/files/3195404'
     processed_url = 'https://data.pyg.org/datasets/qm9_v3.zip'
 
-    def __init__(self, stage, root, remove_h: bool, target_prop=None,
-                 transform=None, pre_transform=None, pre_filter=None):
+    def __init__(self, stage, root, remove_h: bool = True, target_prop=None,
+                 transform=None, pre_transform=None, pre_filter=None, ring_types=None, ring_weights=None):
         self.target_prop = target_prop
         self.stage = stage
         if self.stage == 'train':
@@ -74,18 +75,32 @@ class SelectHOMOTransform:
             self.file_idx = 1
         else:
             self.file_idx = 2
-        self.remove_h = remove_h
+        
+        # 强制设定remove_h=True
+        self.remove_h = True
         self.ring_dict = {}
 
+        # 注意：这里保留H是为了与官方实现兼容，但实际处理时会过滤掉H
         self.atom_types = {"H": 0, "C": 1, "N": 2, "O": 3, "F": 4}
 
         self.bond_types = {BT.SINGLE:1, BT.DOUBLE:2, BT.TRIPLE:3, BT.AROMATIC:4}
 
-        self.ring_types = [
-            ("C1CCC1", 5),
-            ("C1CC1", 6),
-            ("C1CNC1", 7)
-        ]
+        # 从config读取ring_types和ring_weights
+        if ring_types is None:
+            ring_types = ['C1CCC1', 'C1CC1', 'C1CNC1']  # 默认值
+        if ring_weights is None:
+            ring_weights = [48, 36, 50]  # 默认值
+        # 保存权重以便质量计算
+        self.ring_weights = ring_weights
+        
+        # 确保ring_types和ring_weights长度一致
+        assert len(ring_types) == len(ring_weights), "ring_types和ring_weights长度必须一致"
+        
+        # 构建ring_types列表，格式为[(smiles, label), ...]
+        self.ring_types = []
+        base_label = 5  # 从5开始，避免与原子类型冲突
+        for i, (smiles, weight) in enumerate(zip(ring_types, ring_weights)):
+            self.ring_types.append((smiles, base_label + i))
 
         super().__init__(root, transform, pre_transform, pre_filter)
         self.data, self.slices = torch.load(self.processed_paths[self.file_idx])
@@ -93,11 +108,11 @@ class SelectHOMOTransform:
 
     @property
     def raw_file_names(self):
-        return ['qm9_v1_train.smiles', 'qm9_v1_valid.smiles', 'qm9_v1_test.smiles']
+        return ['gdb9.sdf', 'gdb9.sdf.csv', 'uncharacterized.txt']
 
     @property
     def split_file_name(self):
-        return ['qm9_v1_train.smiles', 'qm9_v1_valid.smiles', 'qm9_v1_test.smiles']
+        return ['train.csv', 'val.csv', 'test.csv']
 
     @property
     def split_paths(self):
@@ -128,8 +143,19 @@ class SelectHOMOTransform:
             extract_zip(path, self.raw_dir)
             os.unlink(path)
     
+        # 生成与官方一致的train/val/test划分CSV
         if files_exist(self.split_paths):
             return
+
+        dataset = pd.read_csv(self.raw_paths[1])
+        n_samples = len(dataset)
+        n_train = 100000
+        n_test = int(0.1 * n_samples)
+        n_val = n_samples - (n_train + n_test)
+        train, val, test = np.split(dataset.sample(frac=1, random_state=42), [n_train, n_val + n_train])
+        train.to_csv(os.path.join(self.raw_dir, 'train.csv'))
+        val.to_csv(os.path.join(self.raw_dir, 'val.csv'))
+        test.to_csv(os.path.join(self.raw_dir, 'test.csv'))
         
     def build_ring_graphs(self):
         ring_graphs = []
@@ -325,150 +351,136 @@ class SelectHOMOTransform:
 
     def process(self):
         RDLogger.DisableLog('rdApp.*')
-        smile_list = open(self.split_paths[self.file_idx]).readlines()
-        data_list = self.process_smiles_list(smile_list)
 
-        torch.save(self.collate(data_list), self.processed_paths[self.file_idx]) """
-
-class QM9Dataset(InMemoryDataset):
-    raw_url = ('https://deepchemdata.s3-us-west-1.amazonaws.com/datasets/'
-               'molnet_publish/qm9.zip')
-    raw_url2 = 'https://ndownloader.figshare.com/files/3195404'
-    processed_url = 'https://data.pyg.org/datasets/qm9_v3.zip'
-
-    def __init__(self, stage, root, remove_h: bool, target_prop=None,
-                 transform=None, pre_transform=None, pre_filter=None):
-        self.target_prop = target_prop
-        self.stage = stage
-        if self.stage == 'train':
-            self.file_idx = 0
-        elif self.stage == 'val':
-            self.file_idx = 1
-        else:
-            self.file_idx = 2
-        self.remove_h = remove_h
-        super().__init__(root, transform, pre_transform, pre_filter)
-        self.data, self.slices = torch.load(self.processed_paths[self.file_idx])
-
-    @property
-    def raw_file_names(self):
-        return ['gdb9.sdf', 'gdb9.sdf.csv', 'uncharacterized.txt']
-
-    @property
-    def split_file_name(self):
-        return ['train.csv', 'val.csv', 'test.csv']
-
-    @property
-    def split_paths(self):
-        files = to_list(self.split_file_name)
-        return [osp.join(self.raw_dir, f) for f in files]
-
-    @property
-    def processed_file_names(self):
-        if self.remove_h:
-            return ['proc_tr_no_h.pt', 'proc_val_no_h.pt', 'proc_test_no_h.pt']
-        else:
-            return ['proc_tr_h.pt', 'proc_val_h.pt', 'proc_test_h.pt']
-
-    def download(self):
-        try:
-            import rdkit  # noqa
-            file_path = download_url(self.raw_url, self.raw_dir)
-            extract_zip(file_path, self.raw_dir)
-            os.unlink(file_path)
-
-            file_path = download_url(self.raw_url2, self.raw_dir)
-            os.rename(osp.join(self.raw_dir, '3195404'),
-                      osp.join(self.raw_dir, 'uncharacterized.txt'))
-        except ImportError:
-            path = download_url(self.processed_url, self.raw_dir)
-            extract_zip(path, self.raw_dir)
-            os.unlink(path)
-
-        if files_exist(self.split_paths):
-            return
-
-        dataset = pd.read_csv(self.raw_paths[1])
-
-        n_samples = len(dataset)
-        n_train = 100000
-        n_test = int(0.1 * n_samples)
-        n_val = n_samples - (n_train + n_test)
-
-        # Shuffle dataset with df.sample, then split
-        train, val, test = np.split(dataset.sample(frac=1, random_state=42), [n_train, n_val + n_train])
-
-        train.to_csv(os.path.join(self.raw_dir, 'train.csv'))
-        val.to_csv(os.path.join(self.raw_dir, 'val.csv'))
-        test.to_csv(os.path.join(self.raw_dir, 'test.csv'))
-
-    def process(self):
-        RDLogger.DisableLog('rdApp.*')
-
-        types = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
+        # 与官方实现对齐的类型与键映射（强制remove_h=True）
+        types_remove_h = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
         bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
+        # 读取划分与uncharacterized列表
         target_df = pd.read_csv(self.split_paths[self.file_idx], index_col=0)
-        target_df.drop(columns=['mol_id'], inplace=True)
-
+        # 安全地删除mol_id列（如果存在的话）
+        if 'mol_id' in target_df.columns:
+            target_df.drop(columns=['mol_id'], inplace=True)
         with open(self.raw_paths[-1], 'r') as f:
             skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
 
+        # 预构建环模板
+        ring_graphs = self.build_ring_graphs()
+
+        # 超点类型映射：将RING_<label>映射到新增的原子类型索引（修复：考虑remove_h处理）
+        # 在remove_h处理前，超点类型索引从5开始
+        # 在remove_h处理后，超点类型索引需要调整为从4开始
+        base_type_offset = len(self.atom_types)  # 5 (H, C, N, O, F)
+        supernode_label_to_type = {}
+        for i, (_, r_label) in enumerate(self.ring_types):
+            supernode_label_to_type[r_label] = base_type_offset + i
+
+        # RDKit供应器
         suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False, sanitize=False)
 
         data_list = []
         for i, mol in enumerate(tqdm(suppl)):
             if i in skip or i not in target_df.index:
                 continue
+            if mol is None:
+                continue
 
-            N = mol.GetNumAtoms()
+            # 在压缩之前保存原始 SMILES
+            original_smiles = mol2smiles(mol)
+            if original_smiles is None:
+                continue
 
-            type_idx = []
-            for atom in mol.GetAtoms():
-                type_idx.append(types[atom.GetSymbol()])
+            # 从RDKit分子构建NX图（包含H原子）
+            G = nx.Graph()
+            for a in mol.GetAtoms():
+                idx = a.GetIdx()
+                sym = a.GetSymbol()
+                G.add_node(idx, symbol=sym)
+            for b in mol.GetBonds():
+                s = b.GetBeginAtomIdx(); e = b.GetEndAtomIdx()
+                btype = b.GetBondType()
+                G.add_edge(s, e, bond_label=(bonds.get(btype, 0) + 1))  # 与官方一致：写入时+1
 
+            # 环压缩
+            G = self.contract_rings_in_order(G, ring_graphs)
+
+            # 将压缩后的图转换为PyG张量（对齐官方编码）
+            # 节点类型索引
+            node_type_idx = []
+            sorted_nodes = sorted(G.nodes())
+            node_map = {n: idx for idx, n in enumerate(sorted_nodes)}
+            for n in sorted_nodes:
+                sym = G.nodes[n].get('symbol', '?')
+                if sym.startswith('RING_'):
+                    r_lbl = int(sym.split('_')[1])
+                    node_type_idx.append(supernode_label_to_type[r_lbl])
+                else:
+                    # 使用完整的类型映射（包含H）
+                    mapped = self.atom_types.get(sym, 0)
+                    node_type_idx.append(mapped)
+
+            # 边（双向）与类型（已是+1）
             row, col, edge_type = [], [], []
-            for bond in mol.GetBonds():
-                start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-                row += [start, end]
-                col += [end, start]
-                edge_type += 2 * [bonds[bond.GetBondType()] + 1]
+            for (u, v) in G.edges():
+                et = int(G[u][v].get('bond_label', 0))
+                row += [node_map[u], node_map[v]]
+                col += [node_map[v], node_map[u]]
+                edge_type += [et, et]
 
             edge_index = torch.tensor([row, col], dtype=torch.long)
             edge_type = torch.tensor(edge_type, dtype=torch.long)
-            edge_attr = F.one_hot(edge_type, num_classes=len(bonds)+1).to(torch.float)
+            edge_attr = F.one_hot(edge_type, num_classes=len(bonds) + 1).to(torch.float)
 
-            perm = (edge_index[0] * N + edge_index[1]).argsort()
-            edge_index = edge_index[:, perm]
-            edge_attr = edge_attr[perm]
+            node_type_idx = torch.tensor(node_type_idx).long()
 
-            x = F.one_hot(torch.tensor(type_idx), num_classes=len(types)).float()
+            # remove_h处理：过滤掉H（索引为0），并将其余类型整体左移一位
+            to_keep = node_type_idx > 0  # 保留C, N, O, F以及所有超点
+            edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
+                                             num_nodes=len(to_keep))
+
+            node_type_idx_filtered = node_type_idx[to_keep] - 1  # 去掉H后整体左移
+            x = F.one_hot(
+                node_type_idx_filtered,
+                num_classes=len(types_remove_h) + len(self.ring_types)
+            ).float()
+
+            # 与官方一致的排序
+            N = x.size(0)
+            if edge_index.numel() > 0:
+                perm = (edge_index[0] * N + edge_index[1]).argsort()
+                edge_index = edge_index[:, perm]
+                edge_attr = edge_attr[perm]
+
             y = torch.zeros((1, 0), dtype=torch.float)
-
-            if self.remove_h:
-                type_idx = torch.tensor(type_idx).long()
-                to_keep = type_idx > 0
-                edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
-                                                 num_nodes=len(to_keep))
-                x = x[to_keep]
-                # Shift onehot encoding to match atom decoder
-                x = x[:, 1:]
-
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
-
-            if self.pre_filter is not None and not self.pre_filter(data):
-                continue
-            if self.pre_transform is not None:
-                data = self.pre_transform(data)
-
+            # 保存原始 SMILES（压缩前）
+            data.smiles = original_smiles
+            # 计算并存储分子质量：基础原子权重 + 超点权重
+            try:
+                base_weights = [12, 14, 16, 19]
+                ring_weights = list(self.ring_weights) if hasattr(self, 'ring_weights') else [1] * len(self.ring_types)
+                weights = torch.tensor(base_weights + ring_weights, dtype=torch.float)
+                type_counts = node_type_idx_filtered.bincount(minlength=len(base_weights) + len(self.ring_types)).to(torch.float)
+                total_mass = float((type_counts * weights).sum().item())
+                data.mol_weight = torch.tensor([total_mass], dtype=torch.float)
+            except Exception:
+                pass
             data_list.append(data)
 
         torch.save(self.collate(data_list), self.processed_paths[self.file_idx])
 
+
+
 class QM9DataModule(MolecularDataModule):
     def __init__(self, cfg):
         self.datadir = cfg.dataset.datadir
-        self.remove_h = cfg.dataset.remove_h
+        
+        # 强制设定remove_h=True
+        self.remove_h = True
+        
+        # 从config读取ring_types和ring_weights
+        self.ring_types = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'C1CNC1'])
+        self.ring_weights = getattr(cfg.dataset, 'ring_weights', [48, 36, 50])
 
         target = getattr(cfg.general, 'guidance_target', None)
         regressor = getattr(self, 'regressor', None)
@@ -483,129 +495,221 @@ class QM9DataModule(MolecularDataModule):
 
         base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         root_path = os.path.join(base_path, self.datadir)
-        datasets = {'train': QM9Dataset(stage='train', root=root_path, remove_h=cfg.dataset.remove_h,
-                                        target_prop=target, transform=RemoveYTransform()),
-                    'val': QM9Dataset(stage='val', root=root_path, remove_h=cfg.dataset.remove_h,
-                                      target_prop=target, transform=RemoveYTransform()),
-                    'test': QM9Dataset(stage='test', root=root_path, remove_h=cfg.dataset.remove_h,
-                                       target_prop=target, transform=transform)}
+        datasets = {'train': QM9Dataset(stage='train', root=root_path, remove_h=True,
+                                        target_prop=target, transform=RemoveYTransform(),
+                                        ring_types=self.ring_types, ring_weights=self.ring_weights),
+                    'val': QM9Dataset(stage='val', root=root_path, remove_h=True,
+                                      target_prop=target, transform=RemoveYTransform(),
+                                      ring_types=self.ring_types, ring_weights=self.ring_weights),
+                    'test': QM9Dataset(stage='test', root=root_path, remove_h=True,
+                                       target_prop=target, transform=transform,
+                                       ring_types=self.ring_types, ring_weights=self.ring_weights)}
+        # 供QM9infos访问统计用样本
+        self.datasets = datasets
         super().__init__(cfg, datasets)
 
 
 class QM9infos(AbstractDatasetInfos):
-    def __init__(self, datamodule, cfg, recompute_statistics=False):
-        self.remove_h = cfg.dataset.remove_h
+    def __init__(self, datamodule, cfg):
+        # 强制设定remove_h=True
+        self.remove_h = True
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
 
         self.name = 'qm9'
-        if self.remove_h:
+        
+        # 从config读取ring_types和ring_weights
+        self.ring_types_list = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'C1CNC1'])
+        self.ring_weights_list = getattr(cfg.dataset, 'ring_weights', [48, 36, 50])
+        
+        # 确保长度一致
+        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types和ring_weights长度必须一致"
+        
+        # 基础原子类型（无H）
             self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
-            self.atom_decoder = ['C', 'N', 'O', 'F']
-            self.num_atom_types = 4
-            self.valencies = [4, 3, 2, 1]
-            self.atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
-            self.max_n_nodes = 9
-            self.max_weight = 150
-            self.n_nodes = torch.tensor([0, 2.2930e-05, 3.8217e-05, 6.8791e-05, 2.3695e-04, 9.7072e-04,
-                                        0.0046472, 0.023985, 0.13666, 0.83337])
-            self.node_types = torch.tensor([0.7230, 0.1151, 0.1593, 0.0026])
-            self.edge_types = torch.tensor([0.7261, 0.2384, 0.0274, 0.0081, 0.0])
+        base_atom_decoder = ['C', 'N', 'O', 'F']
+        base_valencies = [4, 3, 2, 1]
+        base_atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
+        base_num_atom_types = 4
+        
+        # 添加超点类型
+        self.atom_decoder = base_atom_decoder + [f"RING_{i}" for i in range(len(self.ring_types_list))]
+        self.num_atom_types = base_num_atom_types + len(self.ring_types_list)
+        
+        # 扩展valencies（超点的valency都是1）
+        self.valencies = base_valencies + [1] * len(self.ring_types_list)
+        
+        # 扩展atom_weights
+        self.atom_weights = base_atom_weights.copy()
+        for i, weight in enumerate(self.ring_weights_list):
+            self.atom_weights[base_num_atom_types + i] = weight
+        
+        # 动态生成label_to_ring映射
+        self.label_to_ring = {}
+        base_label = 4  # 与去掉H后左移1位的编码对齐：原子0..3，超点从4开始
+        for i, ring_smiles in enumerate(self.ring_types_list):
+            self.label_to_ring[base_label + i] = ring_smiles
+        
+        # 固定映射
+                self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
+                self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
 
-            self.edge_consume = torch.tensor([0, 1, 2, 3, 2])
+        # 从config读取统计信息文件路径
+        self.statistics_file = getattr(cfg.dataset, 'statistics_after_4', 'data/qm9/qm9_pyg/statistics_after_compression.json')
+        
+        if not self._load_statistics():
+            print("统计信息文件不存在或内容不充足，开始重新计算...")
+            self._compute_and_save_statistics(datamodule)
+
+        # 如果从文件加载成功或重新计算后，仍缺少 valency_distribution，则重新计算一次
+        if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
+            print("计算 valency_distribution...")
+            self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
+            # 更新统计文件
+            try:
+                import json
+                with open(self.statistics_file, 'r') as f:
+                    stats = json.load(f)
+                stats['valency_distribution'] = self.valency_distribution.tolist()
+                with open(self.statistics_file, 'w') as f:
+                    json.dump(stats, f, indent=2)
+            except Exception as e:
+                print(f"更新统计文件失败: {e}")
 
             super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
-            self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
-            self.valency_distribution[0: 6] = torch.tensor([2.6071e-06, 0.163, 0.352, 0.320, 0.16313, 0.00073])
+            
+    def _load_statistics(self):
+        """尝试从文件加载统计信息"""
+        import json
+        
+        if not os.path.exists(self.statistics_file):
+            return False
+        
+        try:
+            with open(self.statistics_file, 'r') as f:
+                stats = json.load(f)
+            
+            # 检查必需的统计信息是否存在
+            required_keys = ['max_n_nodes', 'max_weight', 'n_nodes', 'node_types', 'edge_types']
+            if not all(key in stats for key in required_keys):
+                print(f"统计信息文件缺少必需的键: {required_keys}")
+                return False
+            
+            # 检查统计信息是否与当前配置匹配
+            expected_num_node_types = 4 + len(self.ring_types_list)  # 基础4个 + 超点数量
+            if len(stats['node_types']) != expected_num_node_types:
+                print(f"节点类型数量不匹配: 期望{expected_num_node_types}, 实际{len(stats['node_types'])}")
+                return False
+            
+            # 加载统计信息
+            self.max_n_nodes = stats['max_n_nodes']
+            self.max_weight = stats['max_weight']
+            self.n_nodes = torch.tensor(stats['n_nodes'])
+            self.node_types = torch.tensor(stats['node_types'])
+            self.edge_types = torch.tensor(stats['edge_types'])
+            
+            # 如果文件中有 valency_distribution 就加载，否则稍后计算
+            if 'valency_distribution' in stats:
+                self.valency_distribution = torch.tensor(stats['valency_distribution'])
+            else:
+                # 如果没有保存，设置为 None，稍后在 _compute_and_save_statistics 中计算
+                self.valency_distribution = None
+            
+            print(f"成功从 {self.statistics_file} 加载统计信息")
+            return True
+            
+        except Exception as e:
+            print(f"加载统计信息失败: {e}")
+            return False
+    
+    def _compute_and_save_statistics(self, datamodule):
+        """计算并保存统计信息"""
+        import json
+        
+        print("开始计算环压缩后的数据集统计信息...")
+        
+        # 计算统计信息
+        self.n_nodes = datamodule.node_counts()
+        self.node_types = datamodule.node_types()
+        self.edge_types = datamodule.edge_counts()
+            
+        # 计算最大节点数和最大质量
+        self.max_n_nodes = len(self.n_nodes) - 1
+        
+        # 计算 valency_distribution（如果还没有计算）
+        if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
+            self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
+            
+        # 基于实际数据观测最大分子质量；若无法遍历数据则退回上界估计
+        observed_max_weight = 0.0
+        datasets = getattr(datamodule, 'datasets', {})
+        if isinstance(datasets, dict):
+            for split_name, ds in datasets.items():
+                if ds is None:
+                    continue
+                try:
+                    length = len(ds)
+                except Exception:
+                    continue
+                for i in range(length):
+                    try:
+                        d = ds[i]
+                    except Exception:
+                        continue
+                    # 优先使用已计算的mol_weight
+                    if hasattr(d, 'mol_weight') and d.mol_weight is not None:
+                        total_mass = float(d.mol_weight.item())
+                    else:
+                        # 回退：从x统计
+                        type_counts = d.x.sum(dim=0)
+                        total_mass = 0.0
+                        for idx_w, cnt in enumerate(type_counts.tolist()):
+                            if cnt > 0:
+                                w = self.atom_weights.get(idx_w, 0)
+                                total_mass += w * cnt
+                    if total_mass > observed_max_weight:
+                        observed_max_weight = total_mass
+
+        if observed_max_weight > 0:
+            self.max_weight = observed_max_weight
         else:
-            self.atom_encoder = {'H': 0, 'C': 1, 'N': 2, 'O': 3, 'F': 4}
-            self.atom_decoder = ['H', 'C', 'N', 'O', 'F']
-            self.valencies = [1, 4, 3, 2, 1]
-            self.num_atom_types = 5
-            self.max_n_nodes = 29
-            self.max_weight = 390
-            self.atom_weights = {0: 1, 1: 12, 2: 14, 3: 16, 4: 19}
-            self.n_nodes = torch.tensor([0, 0, 0, 1.5287e-05, 3.0574e-05, 3.8217e-05,
-                                         9.1721e-05, 1.5287e-04, 4.9682e-04, 1.3147e-03, 3.6918e-03, 8.0486e-03,
-                                         1.6732e-02, 3.0780e-02, 5.1654e-02, 7.8085e-02, 1.0566e-01, 1.2970e-01,
-                                         1.3332e-01, 1.3870e-01, 9.4802e-02, 1.0063e-01, 3.3845e-02, 4.8628e-02,
-                                         5.4421e-03, 1.4698e-02, 4.5096e-04, 2.7211e-03, 0.0000e+00, 2.6752e-04])
-
-            self.node_types = torch.tensor([0.5122, 0.3526, 0.0562, 0.0777, 0.0013])
-            self.edge_types = torch.tensor([0.88162,  0.11062,  5.9875e-03,  1.7758e-03, 0])
-
-            super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
-            self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
-            self.valency_distribution[0:6] = torch.tensor([0, 0.5136, 0.0840, 0.0554, 0.3456, 0.0012])
-
-        if recompute_statistics:
-            np.set_printoptions(suppress=True, precision=5)
-            self.n_nodes = datamodule.node_counts()
-            print("Distribution of number of nodes", self.n_nodes)
-            np.savetxt('n_counts.txt', self.n_nodes.numpy())
-            self.node_types = datamodule.node_types()                                     # There are no node types
-            print("Distribution of node types", self.node_types)
-            np.savetxt('atom_types.txt', self.node_types.numpy())
-
-            self.edge_types = datamodule.edge_counts()
-            print("Distribution of edge types", self.edge_types)
-            np.savetxt('edge_types.txt', self.edge_types.numpy())
-
-            valencies = datamodule.valency_count(self.max_n_nodes)
-            print("Distribution of the valencies", valencies)
-            np.savetxt('valencies.txt', valencies.numpy())
-            self.valency_distribution = valencies
-            assert False
-
-""" class QM9infos(AbstractDatasetInfos):
-    def __init__(self, datamodule, cfg, recompute_statistics=False):
-        self.remove_h = cfg.dataset.remove_h
-        self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
-
-        self.name = 'qm9'
-        if self.remove_h:
-            self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
-            self.atom_decoder = ['C', 'N', 'O', 'F']
-            self.num_atom_types = 4
-            self.valencies = [4, 3, 2, 1, 1, 1, 1] 
-            self.atom_weights = {0: 12, 1: 14, 2: 16, 3: 19, 4: 48, 5: 36, 6: 50}
-            self.max_n_nodes = 9
-            self.max_weight = 150
-
-            self.n_nodes = torch.tensor([0.0, 3.085435714946879e-05, 0.0002776892143452191, 0.0038362250722506195, 0.015468317717600355, 0.04283613250917917, 0.25470271826886487, 0.15281134617560244, 0.08154806594604601, 0.4484886507389619]) 
-            self.node_types = torch.tensor([0.6247562823485964, 0.1255464977977157, 0.1846184970156468, 0.003079396286258941, 0.028743747522090732, 0.024717993558793658, 0.008537585470897804])
-            self.edge_types = torch.tensor([0.4185789123595221, 0.44687886918882214, 0.046334704692231686, 0.021738880972721735, 0.06646863278670231]) 
-
-            self.ring_types = {"C1CCC1", "C1CC1", "C1CNC1"}
-            self.label_to_ring = {4:  "C1CCC1", 5:  "C1CC1", 6:  "C1CNC1"} 
-            self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
-            self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
-
-            self.norm_node_type = torch.tensor([0.650019170321977, 0.13862422959796372, 0.20752591371497195, 0.0038306863650873816, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0])
-            self.super_node_type = torch.tensor([0, 0, 0, 0, 0.29178669386517436, 0.2509200170909542, 0.08666767742202253, 0.13330944275219495, 0.07768114343996801, 0.02166691935550563, 0.07364271635907543, 0.029302716634735985, 0.02509889322288534, 0.009923779857483495])
-
-
-            super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
-            self.valency_distribution = torch.zeros(3 * self.max_n_nodes - 2)
-            self.valency_distribution[0: 6] = torch.tensor([2.6071e-06, 0.163, 0.352, 0.320, 0.16313, 0.00073])
-
-        if recompute_statistics:
-            np.set_printoptions(suppress=True, precision=5)
-            self.n_nodes = datamodule.node_counts()
-            print("Distribution of number of nodes", self.n_nodes)
-            np.savetxt('n_counts.txt', self.n_nodes.numpy())
-            self.node_types = datamodule.node_types()                                     # There are no node types
-            print("Distribution of node types", self.node_types)
-            np.savetxt('atom_types.txt', self.node_types.numpy())
-
-            self.edge_types = datamodule.edge_counts()
-            print("Distribution of edge types", self.edge_types)
-            np.savetxt('edge_types.txt', self.edge_types.numpy())
-
-            valencies = datamodule.valency_count(self.max_n_nodes)
-            print("Distribution of the valencies", valencies)
-            np.savetxt('valencies.txt', valencies.numpy())
-            self.valency_distribution = valencies
-            assert False """
+            # 回退：上界估计（不精确，仅作兜底）
+            self.max_weight = max(self.atom_weights.values()) * self.max_n_nodes
+        
+        # 保存统计信息
+        # 将 ListConfig 转换为普通列表以确保 JSON 序列化
+        try:
+            ring_types_list = OmegaConf.to_container(self.ring_types_list, resolve=True)
+        except (TypeError, AttributeError):
+            ring_types_list = list(self.ring_types_list) if hasattr(self.ring_types_list, '__iter__') else self.ring_types_list
+        
+        try:
+            ring_weights_list = OmegaConf.to_container(self.ring_weights_list, resolve=True)
+        except (TypeError, AttributeError):
+            ring_weights_list = list(self.ring_weights_list) if hasattr(self.ring_weights_list, '__iter__') else self.ring_weights_list
+        
+        stats = {
+            'max_n_nodes': self.max_n_nodes,
+            'max_weight': self.max_weight,
+            'n_nodes': self.n_nodes.tolist(),
+            'node_types': self.node_types.tolist(),
+            'edge_types': self.edge_types.tolist(),
+            'valency_distribution': self.valency_distribution.tolist(),
+            'ring_types_list': ring_types_list,
+            'ring_weights_list': ring_weights_list,
+            'atom_decoder': self.atom_decoder,
+            'label_to_ring': self.label_to_ring
+        }
+        
+        # 确保目录存在
+        os.makedirs(os.path.dirname(self.statistics_file), exist_ok=True)
+        
+        with open(self.statistics_file, 'w') as f:
+            json.dump(stats, f, indent=2)
+        
+        print(f"统计信息已保存到 {self.statistics_file}")
+        print(f"节点数分布: {self.n_nodes}")
+        print(f"节点类型分布: {self.node_types}")
+        print(f"边类型分布: {self.edge_types}")
 
 
 def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=False):
@@ -732,40 +836,29 @@ def compute_qm9_smiles(atom_decoder, train_dataloader, remove_h):
     '''
     print(f"\tConverting QM9 dataset to SMILES for remove_h={remove_h}...")
 
+    # 直接从 dataset 读取，而不是从 dataloader（避免批处理问题）
+    dataset = train_dataloader.dataset
     mols_smiles = []
-    len_train = len(train_dataloader)
+    len_train = len(dataset)
     invalid = 0
-    disconnected = 0
-    for i, data in enumerate(train_dataloader):
-        dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
-        dense_data = dense_data.mask(node_mask, collapse=True)
-        X, E = dense_data.X, dense_data.E
-
-        n_nodes = [int(torch.sum((X != -1)[j, :])) for j in range(X.size(0))]
-
-        molecule_list = []
-        for k in range(X.size(0)):
-            n = n_nodes[k]
-            atom_types = X[k, :n].cpu()
-            edge_types = E[k, :n, :n].cpu()
-            molecule_list.append([atom_types, edge_types])
-
-        for l, molecule in enumerate(molecule_list):
-            mol = build_molecule_with_partial_charges(molecule[0], molecule[1], atom_decoder)
-            smile = mol2smiles(mol)
-            if smile is not None:
-                mols_smiles.append(smile)
-                mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
-                if len(mol_frags) > 1:
-                    print("Disconnected molecule", mol, mol_frags)
-                    disconnected += 1
+    
+    for i in range(len_train):
+        data = dataset[i]
+        # 直接从 data 对象中读取保存的原始 SMILES（在压缩前保存的）
+        if hasattr(data, 'smiles') and data.smiles is not None:
+            if isinstance(data.smiles, str):
+                mols_smiles.append(data.smiles)
             else:
-                print("Invalid molecule obtained.")
+                invalid += 1
+        else:
+            # 如果没有保存的 SMILES，回退到原来的方法（解压缩）
+            # 但这种情况不应该发生，因为我们在 process() 中已经保存了
+            print(f"Warning: data at index {i} does not have smiles attribute, falling back to decompression")
+            # 这里需要解压缩逻辑，但为了简化，我们跳过这个样本
                 invalid += 1
 
         if i % 1000 == 0:
             print("\tConverting QM9 dataset to SMILES {0:.2%}".format(float(i) / len_train))
     print("Number of invalid molecules", invalid)
-    print("Number of disconnected molecules", disconnected)
     return mols_smiles
 

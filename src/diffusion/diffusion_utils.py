@@ -392,11 +392,8 @@ def get_reverse_distribution(dataset_name, limit_dist, node_mask, edge_noise_rat
     node_types = limit_dist.X
     edge_types = limit_dist.E
 
-    if dataset_name == "planar":
-        adjusted_node_types = node_types
-    else:
-        # Compute adjusted node type probabilities
-        adjusted_node_types = compute_adjusted_probabilities(node_types)
+    
+    adjusted_node_types = compute_adjusted_probabilities(node_types)
     # Compute adjusted edge type probabilities
     adjusted_edge_types = edge_noise_ratio * compute_adjusted_probabilities(edge_types) + (1 - edge_noise_ratio) * edge_types
 

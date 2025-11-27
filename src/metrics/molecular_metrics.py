@@ -55,7 +55,7 @@ class TrainMolecularMetrics(nn.Module):
 
 
 class SamplingMolecularMetrics(nn.Module):
-    def __init__(self, dataset_infos, train_smiles):
+    def __init__(self, dataset_infos, train_smiles, cfg=None):
         super().__init__()
         di = dataset_infos
         self.generated_n_dist = GeneratedNDistribution(di.max_n_nodes)
@@ -86,6 +86,7 @@ class SamplingMolecularMetrics(nn.Module):
 
         self.train_smiles = train_smiles
         self.dataset_info = di
+        self.cfg = cfg
 
     def forward(self, molecules: list, name, current_epoch, val_counter, local_rank, test=False):
         stability, rdkit_metrics, all_smiles = compute_molecular_metrics(molecules, self.train_smiles, self.dataset_info)
@@ -151,7 +152,17 @@ class SamplingMolecularMetrics(nn.Module):
             print("Custom metrics computed.")
         if local_rank == 0:
             valid_unique_molecules = rdkit_metrics[1]
-            textfile = open(f'graphs/{name}/valid_unique_molecules_e{current_epoch}_b{val_counter}.txt', "w")
+            # 获取可视化目录，如果没有配置则使用当前目录
+            import os
+            vis_dir = None
+            if self.cfg is not None:
+                vis_dir = getattr(self.cfg.general, 'visualization_dir', None)
+            if vis_dir is None:
+                vis_dir = os.getcwd()
+            
+            file_path = os.path.join(vis_dir, f'graphs/{name}/valid_unique_molecules_e{current_epoch}_b{val_counter}.txt')
+            os.makedirs(os.path.dirname(file_path), exist_ok=True)
+            textfile = open(file_path, "w")
             textfile.writelines(valid_unique_molecules)
             textfile.close()
             print("Stability metrics:", stability, "--", rdkit_metrics[0])

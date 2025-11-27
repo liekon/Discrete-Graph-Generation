@@ -14,7 +14,6 @@ from pytorch_lightning.utilities.warnings import PossibleUserWarning
 import utils
 from metrics.abstract_metrics import TrainAbstractMetricsDiscrete, TrainAbstractMetrics
 
-from diffusion_model import LiftedDenoisingDiffusion
 from diffusion_model_discrete import DiscreteDenoisingDiffusion
 from diffusion.extra_features import DummyExtraFeatures, ExtraFeatures
 
@@ -27,10 +26,9 @@ def get_resume(cfg, model_kwargs):
     saved_cfg = cfg.copy()
     name = cfg.general.name + '_resume'
     resume = cfg.general.test_only
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+    
+    model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume, **model_kwargs)
+    
     cfg = model.cfg
     cfg.general.test_only = resume
     cfg.general.name = name
@@ -47,11 +45,8 @@ def get_resume_adaptive(cfg, model_kwargs):
 
     resume_path = os.path.join(root_dir, cfg.general.resume)
 
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
-    new_cfg = model.cfg
+    model = DiscreteDenoisingDiffusion.load_from_checkpoint(resume_path, **model_kwargs)
+
 
     for category in cfg:
         for arg in cfg[category]:
@@ -88,13 +83,15 @@ def main(cfg: DictConfig):
             from datasets import guacamol_dataset
             datamodule = guacamol_dataset.GuacamolDataModule(cfg)
             dataset_infos = guacamol_dataset.Guacamolinfos(datamodule, cfg)
-            train_smiles = None
+            train_smiles = guacamol_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+                           dataset_infos=dataset_infos, evaluate_dataset=False)
 
-        elif dataset_config.name == 'moses':
+        elif dataset_config['name'] == 'moses':
             from datasets import moses_dataset
             datamodule = moses_dataset.MosesDataModule(cfg)
             dataset_infos = moses_dataset.MOSESinfos(datamodule, cfg)
-            train_smiles = None
+            train_smiles = moses_dataset.get_train_smiles(cfg=cfg, train_dataloader=datamodule.train_dataloader(),
+                           dataset_infos=dataset_infos, evaluate_dataset=False)
         else:
             raise ValueError("Dataset not implemented")
 
@@ -114,7 +111,7 @@ def main(cfg: DictConfig):
             train_metrics = TrainMolecularMetrics(dataset_infos)
 
         # We do not evaluate novelty during training
-        sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles)
+        sampling_metrics = SamplingMolecularMetrics(dataset_infos, train_smiles, cfg=cfg)
         visualization_tools = MolecularVisualization(cfg.dataset.remove_h, dataset_infos=dataset_infos)
 
         model_kwargs = {'dataset_infos': dataset_infos, 'train_metrics': train_metrics,
@@ -134,10 +131,7 @@ def main(cfg: DictConfig):
 
     utils.create_folders(cfg)
 
-    if cfg.model.type == 'discrete':
-        model = DiscreteDenoisingDiffusion(cfg=cfg, dataset_name=dataset_config['name'], **model_kwargs)
-    else:
-        model = LiftedDenoisingDiffusion(cfg=cfg, dataset_name=dataset_config['name'], **model_kwargs)
+    model = DiscreteDenoisingDiffusion(cfg=cfg, dataset_name=dataset_config['name'], **model_kwargs)
 
     callbacks = []
     if cfg.train.save_model:
