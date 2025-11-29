@@ -129,7 +129,7 @@ class AromaticCE(CEPerClass):
 
 
 class RingCE(CEPerClass):
-    """用于超节点（压缩的环）的交叉熵指标"""
+    """Cross-entropy metric specialized for supernodes (compressed rings)."""
     def __init__(self, i, name=None):
         super().__init__(i, name=name)
 
@@ -142,17 +142,17 @@ class AtomMetricsCE(MetricCollection):
                       'Br': BrCE, 'Cl': ClCE, 'I': IodineCE, 'P': PhosphorusCE, 'S': SulfurCE, 'Se': SeCE,
                       'Si': SiCE}
 
-        # 使用字典方式传递 metrics，键作为名称，避免名称冲突
+        # Use a dict to avoid MetricCollection name collisions
         metrics_dict = {}
         for i, atom_type in enumerate(atom_decoder):
-            # 处理超节点类型（以 'RING_' 开头）
+            # Handle supernode types (prefixed with 'RING_')
             if atom_type.startswith('RING_'):
-                # 为每个超节点类型设置唯一名称，避免 MetricCollection 中的名称冲突
+                # Assign a unique metric name for each supernode type
                 metrics_dict[f'RingCE_{atom_type}'] = RingCE(i)
             elif atom_type in class_dict:
                 metrics_dict[atom_type] = class_dict[atom_type](i)
             else:
-                # 对于未知类型，使用通用的 CEPerClass，也设置唯一名称
+                # For unknown types, fall back to CEPerClass with a unique name
                 metrics_dict[f'CEPerClass_{atom_type}'] = CEPerClass(i)
         super().__init__(metrics_dict)
 

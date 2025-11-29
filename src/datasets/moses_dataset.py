@@ -30,7 +30,7 @@ def to_list(value: Any) -> Sequence:
         return [value]
 
 
-# moses 不包含 H，所以原子类型只有 7 种
+# Moses does not contain hydrogen atoms, so there are only 7 atom types
 atom_decoder = ['C', 'N', 'S', 'O', 'F', 'Cl', 'Br']
 
 
@@ -45,24 +45,24 @@ class MOSESDataset(InMemoryDataset):
         self.atom_decoder = atom_decoder
         self.filter_dataset = filter_dataset
         
-        # moses 不包含 H，原子类型从 0 开始
+        # Moses has no hydrogen atoms, so indices start at 0
         self.atom_types = {"C": 0, "N": 1, "S": 2, "O": 3, "F": 4, "Cl": 5, "Br": 6}
         self.bond_types = {BT.SINGLE: 1, BT.DOUBLE: 2, BT.TRIPLE: 3, BT.AROMATIC: 4}
         
-        # 从config读取ring_types和ring_weights
+        # Read ring configuration from the config
         if ring_types is None:
-            ring_types = ['C1CCC1', 'C1CC1', 'N1CCC1']  # 默认值（与qm9一致）
+            ring_types = ['C1CCC1', 'C1CC1', 'N1CCC1']  # default values matching QM9
         if ring_weights is None:
-            ring_weights = [56, 42, 57]  # 默认值（与qm9一致）
-        # 保存权重以便质量计算
+            ring_weights = [56, 42, 57]  # default values matching QM9
+        # Store weights so we can compute molecular masses
         self.ring_weights = ring_weights
         
-        # 确保ring_types和ring_weights长度一致
-        assert len(ring_types) == len(ring_weights), "ring_types和ring_weights长度必须一致"
+        # Ensure lengths match
+        assert len(ring_types) == len(ring_weights), "ring_types and ring_weights must have identical lengths"
         
-        # 构建ring_types列表，格式为[(smiles, label), ...]
+        # Build (smiles, label) tuples for each ring
         self.ring_types = []
-        base_label = len(self.atom_types)  # 从7开始（moses有7种原子类型）
+        base_label = len(self.atom_types)  # start at 7 (seven atom types)
         for i, (smiles, weight) in enumerate(zip(ring_types, ring_weights)):
             self.ring_types.append((smiles, base_label + i))
         
@@ -94,7 +94,7 @@ class MOSESDataset(InMemoryDataset):
 
     @property
     def processed_file_names(self):
-        # 根据是否有环压缩使用不同的文件名
+        # Use distinct filenames depending on whether ring compression is enabled
         ring_suffix = '_ring' if len(self.ring_types) > 0 else ''
         if self.filter_dataset:
             return [f'train_filtered{ring_suffix}.pt', f'test_filtered{ring_suffix}.pt', f'test_scaffold_filtered{ring_suffix}.pt']
@@ -208,17 +208,17 @@ class MOSESDataset(InMemoryDataset):
     def process(self):
         RDLogger.DisableLog('rdApp.*')
         
-        # moses 不包含 H，所以类型映射直接从 0 开始
+        # Moses has no hydrogen atoms, so the type mapping starts at 0
         types = {atom: i for i, atom in enumerate(self.atom_decoder)}
         bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
         path = self.split_paths[self.file_idx]
         smiles_list = pd.read_csv(path)['SMILES'].values
 
-        # 预构建环模板
+        # Prebuild ring templates
         ring_graphs = self.build_ring_graphs()
         
-        # 超点类型映射：将RING_<label>映射到新增的原子类型索引
+        # Map each RING_<label> to a new atom index
         base_type_offset = len(self.atom_types)  # 7 (C, N, S, O, F, Cl, Br)
         supernode_label_to_type = {}
         for i, (_, r_label) in enumerate(self.ring_types):
@@ -232,12 +232,12 @@ class MOSESDataset(InMemoryDataset):
             if mol is None:
                 continue
             
-            # 在压缩之前保存原始 SMILES
+            # Save original SMILES before compression
             original_smiles = mol2smiles(mol)
             if original_smiles is None:
                 continue
 
-            # 从RDKit分子构建NX图
+            # Build a NetworkX graph from the RDKit molecule
             G = nx.Graph()
             for a in mol.GetAtoms():
                 idx = a.GetIdx()
@@ -247,13 +247,13 @@ class MOSESDataset(InMemoryDataset):
                 s = b.GetBeginAtomIdx()
                 e = b.GetEndAtomIdx()
                 btype = b.GetBondType()
-                G.add_edge(s, e, bond_label=(bonds.get(btype, 0) + 1))  # 与官方一致：写入时+1
+                G.add_edge(s, e, bond_label=(bonds.get(btype, 0) + 1))  # +1 to match the official format
 
-            # 环压缩
+            # Apply ring compression
             if len(ring_graphs) > 0:
                 G = self.contract_rings_in_order(G, ring_graphs)
 
-            # 将压缩后的图转换为PyG张量
+            # Convert the compressed graph into PyG tensors
             node_type_idx = []
             sorted_nodes = sorted(G.nodes())
             node_map = {n: idx for idx, n in enumerate(sorted_nodes)}
@@ -266,7 +266,7 @@ class MOSESDataset(InMemoryDataset):
                     mapped = self.atom_types.get(sym, 0)
                     node_type_idx.append(mapped)
 
-            # 边（双向）与类型（已是+1）
+            # Bidirectional edges using the +1 encoding
             row, col, edge_type = [], [], []
             for (u, v) in G.edges():
                 et = int(G[u][v].get('bond_label', 0))
@@ -283,26 +283,26 @@ class MOSESDataset(InMemoryDataset):
 
             node_type_idx = torch.tensor(node_type_idx).long()
             
-            # moses 不包含 H，无需左移处理
+            # Moses has no hydrogens, so no shift is required
             x = F.one_hot(
                 node_type_idx,
                 num_classes=len(types) + len(self.ring_types)
             ).float()
 
-            # 与官方一致的排序
+            # Sort edges as in the official release
             N = x.size(0)
             if edge_index.numel() > 0:
-                perm = (edge_index[0] * N + edge_index[1]).argsort()
-                edge_index = edge_index[:, perm]
-                edge_attr = edge_attr[perm]
+            perm = (edge_index[0] * N + edge_index[1]).argsort()
+            edge_index = edge_index[:, perm]
+            edge_attr = edge_attr[perm]
 
             y = torch.zeros((1, 0), dtype=torch.float)
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
             
-            # 保存原始 SMILES（压缩前）
+            # Store the original SMILES (before compression)
             data.smiles = original_smiles
             
-            # 计算并存储分子质量：基础原子权重 + 超点权重
+            # Compute molecular mass using base atoms plus supernodes
             try:
                 base_weights = [12, 14, 32, 16, 19, 35.4, 79.9]  # C, N, S, O, F, Cl, Br
                 ring_weights = list(self.ring_weights) if hasattr(self, 'ring_weights') else [1] * len(self.ring_types)
@@ -315,28 +315,28 @@ class MOSESDataset(InMemoryDataset):
 
             if self.filter_dataset:
                 if len(self.ring_types) == 0:
-                    dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
-                    dense_data = dense_data.mask(node_mask, collapse=True)
-                    X, E = dense_data.X, dense_data.E
+                dense_data, node_mask = utils.to_dense(data.x, data.edge_index, data.edge_attr, data.batch)
+                dense_data = dense_data.mask(node_mask, collapse=True)
+                X, E = dense_data.X, dense_data.E
 
-                    assert X.size(0) == 1
-                    atom_types = X[0]
-                    edge_types = E[0]
+                assert X.size(0) == 1
+                atom_types = X[0]
+                edge_types = E[0]
                     mol = build_molecule_with_partial_charges(atom_types, edge_types, self.atom_decoder)
-                    smiles = mol2smiles(mol)
-                    if smiles is not None:
-                        try:
-                            mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
-                            if len(mol_frags) == 1:
-                                data_list.append(data)
-                                smiles_kept.append(smiles)
+                smiles = mol2smiles(mol)
+                if smiles is not None:
+                    try:
+                        mol_frags = Chem.rdmolops.GetMolFrags(mol, asMols=True, sanitizeFrags=True)
+                        if len(mol_frags) == 1:
+                            data_list.append(data)
+                            smiles_kept.append(smiles)
 
-                        except Chem.rdchem.AtomValenceException:
-                            print("Valence error in GetmolFrags")
-                        except Chem.rdchem.KekulizeException:
-                            print("Can't kekulize molecule")
+                    except Chem.rdchem.AtomValenceException:
+                        print("Valence error in GetmolFrags")
+                    except Chem.rdchem.KekulizeException:
+                        print("Can't kekulize molecule")
                 else:
-                    # 启用环压缩后，无法在RDKit中重建RING_*原子，因此直接保留原始样本
+                    # When ring compression is enabled, RDKit cannot rebuild RING_* atoms, so keep the original sample
                     data_list.append(data)
                     smiles_kept.append(original_smiles)
             else:
@@ -363,7 +363,7 @@ class MosesDataModule(MolecularDataModule):
         self.datadir = cfg.dataset.datadir
         self.filter_dataset = cfg.dataset.filter
         
-        # 从config读取ring_types和ring_weights
+        # Read ring configuration from the config
         self.ring_types = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'N1CCC1'])
         self.ring_weights = getattr(cfg.dataset, 'ring_weights', [56, 42, 57])
         
@@ -375,7 +375,7 @@ class MosesDataModule(MolecularDataModule):
                                        ring_types=self.ring_types, ring_weights=self.ring_weights),
                     'test': MOSESDataset(stage='test', root=root_path, filter_dataset=self.filter_dataset,
                                         ring_types=self.ring_types, ring_weights=self.ring_weights)}
-        # 供MOSESinfos访问统计用样本
+        # Share datasets so MOSESinfos can reuse them for statistics
         self.datasets = datasets
         super().__init__(cfg, datasets)
 
@@ -390,55 +390,55 @@ class MOSESinfos(AbstractDatasetInfos):
         self.remove_h = False
         self.need_to_strip = False
 
-        # 从config读取ring_types和ring_weights
+        # Read ring configuration from the config
         self.ring_types_list = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'N1CCC1'])
         self.ring_weights_list = getattr(cfg.dataset, 'ring_weights', [56, 42, 57])
         
-        # 确保长度一致
-        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types和ring_weights长度必须一致"
+        # Ensure lengths match
+        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types and ring_weights must have identical lengths"
         
-        # 基础原子类型（moses不包含H）
+        # Base atom types (Moses does not include hydrogen)
         self.atom_encoder = {'C': 0, 'N': 1, 'S': 2, 'O': 3, 'F': 4, 'Cl': 5, 'Br': 6}
         base_atom_decoder = ['C', 'N', 'S', 'O', 'F', 'Cl', 'Br']
         base_valencies = [4, 3, 4, 2, 1, 1, 1]
         base_atom_weights = {0: 12, 1: 14, 2: 32, 3: 16, 4: 19, 5: 35.4, 6: 79.9}
         base_num_atom_types = 7
         
-        # 添加超点类型
+        # Append supernode types
         self.atom_decoder = base_atom_decoder + [f"RING_{i}" for i in range(len(self.ring_types_list))]
         self.num_atom_types = base_num_atom_types + len(self.ring_types_list)
         
-        # 扩展valencies（超点的valency都是1）
+        # Extend valencies (supernodes have valency 1)
         self.valencies = base_valencies + [1] * len(self.ring_types_list)
         
-        # 扩展atom_weights
+        # Extend atom weights
         self.atom_weights = base_atom_weights.copy()
         for i, weight in enumerate(self.ring_weights_list):
             self.atom_weights[base_num_atom_types + i] = weight
         
-        # 动态生成label_to_ring映射
+        # Build the label_to_ring mapping
         self.label_to_ring = {}
-        base_label = 7  # moses有7种原子类型，超点从7开始
+        base_label = 7  # Moses has 7 atom types, so rings start at 7
         for i, ring_smiles in enumerate(self.ring_types_list):
             self.label_to_ring[base_label + i] = ring_smiles
         
-        # 固定映射
+        # Fixed mappings
         self.label_to_symbol = {0: "C", 1: "N", 2: "S", 3: "O", 4: "F", 5: "Cl", 6: "Br"}
         self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 
                                   3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
 
-        # 从config读取统计信息文件路径
+        # Path to the cached statistics file
         self.statistics_file = getattr(cfg.dataset, 'statistics_after_4', 'data/moses/moses_pyg/statistics_after_compression.json')
         
         if not self._load_statistics():
-            print("统计信息文件不存在或内容不充足，开始重新计算...")
+            print("Statistics file missing or incomplete, recomputing...")
             self._compute_and_save_statistics(datamodule)
 
-        # 如果从文件加载成功或重新计算后，仍缺少 valency_distribution，则重新计算一次
+        # Recompute valency_distribution if it is still missing after loading
         if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
-            print("计算 valency_distribution...")
+            print("Computing valency_distribution...")
             self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
-            # 更新统计文件
+            # Update the statistics file
             try:
                 with open(self.statistics_file, 'r') as f:
                     stats = json.load(f)
@@ -446,12 +446,12 @@ class MOSESinfos(AbstractDatasetInfos):
                 with open(self.statistics_file, 'w') as f:
                     json.dump(stats, f, indent=2)
             except Exception as e:
-                print(f"更新统计文件失败: {e}")
+                print(f"Failed to update statistics file: {e}")
 
         super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
             
     def _load_statistics(self):
-        """尝试从文件加载统计信息"""
+        """Attempt to load statistics from disk."""
         if not os.path.exists(self.statistics_file):
             return False
         
@@ -459,55 +459,55 @@ class MOSESinfos(AbstractDatasetInfos):
             with open(self.statistics_file, 'r') as f:
                 stats = json.load(f)
             
-            # 检查必需的统计信息是否存在
+            # Ensure required statistics are present
             required_keys = ['max_n_nodes', 'max_weight', 'n_nodes', 'node_types', 'edge_types']
             if not all(key in stats for key in required_keys):
-                print(f"统计信息文件缺少必需的键: {required_keys}")
+                print(f"Statistics file missing required keys: {required_keys}")
                 return False
             
-            # 检查统计信息是否与当前配置匹配
-            expected_num_node_types = 7 + len(self.ring_types_list)  # 基础7个 + 超点数量
+            # Ensure the statistics match the current configuration
+            expected_num_node_types = 7 + len(self.ring_types_list)  # base 7 types + rings
             if len(stats['node_types']) != expected_num_node_types:
-                print(f"节点类型数量不匹配: 期望{expected_num_node_types}, 实际{len(stats['node_types'])}")
+                print(f"Node type count mismatch: expected {expected_num_node_types}, got {len(stats['node_types'])}")
                 return False
             
-            # 加载统计信息
+            # Load statistics values
             self.max_n_nodes = stats['max_n_nodes']
             self.max_weight = stats['max_weight']
             self.n_nodes = torch.tensor(stats['n_nodes'])
             self.node_types = torch.tensor(stats['node_types'])
             self.edge_types = torch.tensor(stats['edge_types'])
             
-            # 如果文件中有 valency_distribution 就加载，否则稍后计算
+            # Load valency_distribution if present, otherwise compute later
             if 'valency_distribution' in stats:
                 self.valency_distribution = torch.tensor(stats['valency_distribution'])
             else:
                 self.valency_distribution = None
             
-            print(f"成功从 {self.statistics_file} 加载统计信息")
+            print(f"Loaded statistics from {self.statistics_file}")
             return True
             
         except Exception as e:
-            print(f"加载统计信息失败: {e}")
+            print(f"Failed to load statistics: {e}")
             return False
     
     def _compute_and_save_statistics(self, datamodule):
-        """计算并保存统计信息"""
-        print("开始计算环压缩后的数据集统计信息...")
+        """Compute and save dataset statistics."""
+        print("Computing statistics for the ring-compressed dataset...")
         
-        # 计算统计信息
-        self.n_nodes = datamodule.node_counts()
+        # Aggregate statistics
+            self.n_nodes = datamodule.node_counts()
         self.node_types = datamodule.node_types()
         self.edge_types = datamodule.edge_counts()
             
-        # 计算最大节点数
-        self.max_n_nodes = len(self.n_nodes) - 1
+        # Determine maximum node count
+            self.max_n_nodes = len(self.n_nodes) - 1
         
-        # 计算 valency_distribution（如果还没有计算）
+        # Compute valency distribution if needed
         if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
             self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
             
-        # 基于实际数据观测最大分子质量
+        # Observe maximum molecular weight
         observed_max_weight = 0.0
         datasets = getattr(datamodule, 'datasets', {})
         if isinstance(datasets, dict):
@@ -531,13 +531,13 @@ class MOSESinfos(AbstractDatasetInfos):
         if observed_max_weight > 0:
             self.max_weight = observed_max_weight
         else:
-            # 上界估计：假设所有节点都是最重的原子类型（Br=79.9）加上所有超点
+            # Upper bound approximation: assume all nodes are the heaviest atom (Br=79.9) plus supernodes
             max_ring_weight = max(self.ring_weights_list) if self.ring_weights_list else 100
-            estimated_max = self.max_n_nodes * 79.9 + max_ring_weight * 10  # 假设最多10个超点
+            estimated_max = self.max_n_nodes * 79.9 + max_ring_weight * 10  # assume up to 10 supernodes
             self.max_weight = estimated_max
-            print(f"无法从数据中获取最大质量，使用估计值: {self.max_weight}")
+            print(f"Could not observe max weight directly; using upper bound {self.max_weight}")
         
-        # 保存统计信息到JSON文件
+        # Persist statistics to JSON
         stats = {
             'max_n_nodes': int(self.max_n_nodes),
             'max_weight': float(self.max_weight),
@@ -553,12 +553,12 @@ class MOSESinfos(AbstractDatasetInfos):
         with open(self.statistics_file, 'w') as f:
             json.dump(stats, f, indent=2)
         
-        print(f"统计信息已保存到 {self.statistics_file}")
-        print(f"最大节点数: {self.max_n_nodes}, 最大分子质量: {self.max_weight}")
+        print(f"Saved statistics to {self.statistics_file}")
+        print(f"Max nodes: {self.max_n_nodes}, max weight: {self.max_weight}")
 
 
 def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=False):
-    """从数据集的smiles属性中获取训练集SMILES"""
+    """Collect training SMILES strings either from saved attributes or from file."""
     train_smiles = []
     for data in train_dataloader:
         if hasattr(data, 'smiles'):
@@ -568,18 +568,18 @@ def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=Fals
                 train_smiles.append(data.smiles)
     
     if len(train_smiles) == 0:
-        print("警告: 无法从数据集中获取SMILES，尝试从文件读取...")
-        base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
+        print("Warning: could not gather SMILES from the dataset, falling back to file input...")
+    base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         smiles_path = os.path.join(base_path, cfg.dataset.datadir, 'train_moses.csv')
-        if os.path.exists(smiles_path):
+    if os.path.exists(smiles_path):
             df = pd.read_csv(smiles_path)
             train_smiles = df['SMILES'].tolist()
-            print(f"从文件读取了 {len(train_smiles)} 个SMILES")
+            print(f"Loaded {len(train_smiles)} SMILES from file")
         else:
-            print("无法找到SMILES文件")
+            print("SMILES file not found")
             return None
     train_smiles = [s.strip() if isinstance(s, str) else str(s) for s in train_smiles]
-    print(f"获取了 {len(train_smiles)} 个训练集SMILES")
+    print(f"Collected {len(train_smiles)} training SMILES")
 
     if evaluate_dataset:
         all_molecules = []
@@ -603,5 +603,5 @@ def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=Fals
 
 
 if __name__ == "__main__":
-    # 测试代码已移除，请使用main.py进行训练
+    # Test harness removed; use main.py for training
     pass

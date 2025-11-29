@@ -1,4 +1,11 @@
 name: 'guacamol'
-datadir: 'data/guacamol/guacamol_pyg/'       # Relative to the guacamol_dataset.py file
+datadir: 'data/guacamol/'       # Relative to the guacamol_dataset.py file
 remove_h: null
-filter: True                      # Use the filtered version or the raw guacamol file
+filter: False                      # Use the filtered version or the raw guacamol file
+
+# Ring compression configuration (same as QM9)
+ring_types: ['C1CCC1', 'C1CC1', 'N1CCC1']  # User-specified ring SMILES
+ring_weights: [56, 42, 57]  # Corresponding ring masses
+
+# Statistics file path after ring compression
+statistics_after_4: 'data/guacamol/statistics_after_compression.json'

@@ -8,7 +8,7 @@ import wandb
 
 
 def create_folders(args):
-    # 获取可视化目录，如果没有配置则使用默认路径
+    # Use the configured visualization directory or default to the CWD
     vis_dir = getattr(args.general, 'visualization_dir', None)
     if vis_dir is None:
         vis_dir = os.getcwd()

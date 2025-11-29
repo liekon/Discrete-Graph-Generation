@@ -76,29 +76,29 @@ class QM9Dataset(InMemoryDataset):
         else:
             self.file_idx = 2
         
-        # 强制设定remove_h=True
+        # Always enforce remove_h=True
         self.remove_h = True
         self.ring_dict = {}
 
-        # 注意：这里保留H是为了与官方实现兼容，但实际处理时会过滤掉H
+        # Keep hydrogens for compatibility with the official dataset; they are filtered later
         self.atom_types = {"H": 0, "C": 1, "N": 2, "O": 3, "F": 4}
 
         self.bond_types = {BT.SINGLE:1, BT.DOUBLE:2, BT.TRIPLE:3, BT.AROMATIC:4}
 
-        # 从config读取ring_types和ring_weights
+        # Read ring_types and ring_weights from the config
         if ring_types is None:
-            ring_types = ['C1CCC1', 'C1CC1', 'C1CNC1']  # 默认值
+            ring_types = ['C1CCC1', 'C1CC1', 'C1CNC1']  # default values
         if ring_weights is None:
-            ring_weights = [48, 36, 50]  # 默认值
-        # 保存权重以便质量计算
+            ring_weights = [48, 36, 50]  # default values
+        # Store weights so we can compute molecular masses
         self.ring_weights = ring_weights
         
-        # 确保ring_types和ring_weights长度一致
-        assert len(ring_types) == len(ring_weights), "ring_types和ring_weights长度必须一致"
+        # Ensure ring_types and ring_weights have the same length
+        assert len(ring_types) == len(ring_weights), "ring_types and ring_weights must have identical lengths"
         
-        # 构建ring_types列表，格式为[(smiles, label), ...]
+        # Build the ring list as (smiles, label) tuples
         self.ring_types = []
-        base_label = 5  # 从5开始，避免与原子类型冲突
+        base_label = 5  # start from 5 to avoid collisions with atom labels
         for i, (smiles, weight) in enumerate(zip(ring_types, ring_weights)):
             self.ring_types.append((smiles, base_label + i))
 
@@ -143,7 +143,7 @@ class QM9Dataset(InMemoryDataset):
             extract_zip(path, self.raw_dir)
             os.unlink(path)
     
-        # 生成与官方一致的train/val/test划分CSV
+        # Generate train/val/test splits identical to the official release
         if files_exist(self.split_paths):
             return
 
@@ -324,7 +324,7 @@ class QM9Dataset(InMemoryDataset):
        
         rd_mol = Chem.MolFromSmiles(smi)
         if rd_mol is None:
-            print(f"Warning: 无法解析SMILES: {smi}")
+            print(f"Warning: failed to parse SMILES: {smi}")
             return None
         
         
@@ -352,30 +352,29 @@ class QM9Dataset(InMemoryDataset):
     def process(self):
         RDLogger.DisableLog('rdApp.*')
 
-        # 与官方实现对齐的类型与键映射（强制remove_h=True）
+        # Match the official type/bond mapping (remove_h enforced)
         types_remove_h = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
         bonds = {BT.SINGLE: 0, BT.DOUBLE: 1, BT.TRIPLE: 2, BT.AROMATIC: 3}
 
-        # 读取划分与uncharacterized列表
+        # Load split CSV and uncharacterized list
         target_df = pd.read_csv(self.split_paths[self.file_idx], index_col=0)
-        # 安全地删除mol_id列（如果存在的话）
+        # Drop mol_id if present
         if 'mol_id' in target_df.columns:
             target_df.drop(columns=['mol_id'], inplace=True)
         with open(self.raw_paths[-1], 'r') as f:
             skip = [int(x.split()[0]) - 1 for x in f.read().split('\n')[9:-2]]
 
-        # 预构建环模板
+        # Prebuild ring templates
         ring_graphs = self.build_ring_graphs()
 
-        # 超点类型映射：将RING_<label>映射到新增的原子类型索引（修复：考虑remove_h处理）
-        # 在remove_h处理前，超点类型索引从5开始
-        # 在remove_h处理后，超点类型索引需要调整为从4开始
+        # Map each RING_<label> to a new atom index (taking the remove_h shift into account)
+        # Before remove_h the indices start at 5; afterwards they must start at 4
         base_type_offset = len(self.atom_types)  # 5 (H, C, N, O, F)
         supernode_label_to_type = {}
         for i, (_, r_label) in enumerate(self.ring_types):
             supernode_label_to_type[r_label] = base_type_offset + i
 
-        # RDKit供应器
+        # RDKit supplier
         suppl = Chem.SDMolSupplier(self.raw_paths[0], removeHs=False, sanitize=False)
 
         data_list = []
@@ -385,12 +384,12 @@ class QM9Dataset(InMemoryDataset):
             if mol is None:
                 continue
 
-            # 在压缩之前保存原始 SMILES
+            # Save original SMILES before compression
             original_smiles = mol2smiles(mol)
             if original_smiles is None:
                 continue
 
-            # 从RDKit分子构建NX图（包含H原子）
+            # Build a NetworkX graph (with hydrogens) from the RDKit molecule
             G = nx.Graph()
             for a in mol.GetAtoms():
                 idx = a.GetIdx()
@@ -399,13 +398,13 @@ class QM9Dataset(InMemoryDataset):
             for b in mol.GetBonds():
                 s = b.GetBeginAtomIdx(); e = b.GetEndAtomIdx()
                 btype = b.GetBondType()
-                G.add_edge(s, e, bond_label=(bonds.get(btype, 0) + 1))  # 与官方一致：写入时+1
+                G.add_edge(s, e, bond_label=(bonds.get(btype, 0) + 1))  # +1 to match official format
 
-            # 环压缩
+            # Apply ring compression
             G = self.contract_rings_in_order(G, ring_graphs)
 
-            # 将压缩后的图转换为PyG张量（对齐官方编码）
-            # 节点类型索引
+            # Convert the compressed graph to PyG tensors (matching the official encoding)
+            # Node type indices
             node_type_idx = []
             sorted_nodes = sorted(G.nodes())
             node_map = {n: idx for idx, n in enumerate(sorted_nodes)}
@@ -415,11 +414,11 @@ class QM9Dataset(InMemoryDataset):
                     r_lbl = int(sym.split('_')[1])
                     node_type_idx.append(supernode_label_to_type[r_lbl])
                 else:
-                    # 使用完整的类型映射（包含H）
+                    # Use the full atom map (including hydrogen)
                     mapped = self.atom_types.get(sym, 0)
                     node_type_idx.append(mapped)
 
-            # 边（双向）与类型（已是+1）
+            # Bidirectional edges with +1 encoding
             row, col, edge_type = [], [], []
             for (u, v) in G.edges():
                 et = int(G[u][v].get('bond_label', 0))
@@ -433,18 +432,18 @@ class QM9Dataset(InMemoryDataset):
 
             node_type_idx = torch.tensor(node_type_idx).long()
 
-            # remove_h处理：过滤掉H（索引为0），并将其余类型整体左移一位
-            to_keep = node_type_idx > 0  # 保留C, N, O, F以及所有超点
+            # remove_h: drop hydrogens (index 0) and shift the remaining types down by one
+            to_keep = node_type_idx > 0  # Keep C, N, O, F and supernodes
             edge_index, edge_attr = subgraph(to_keep, edge_index, edge_attr, relabel_nodes=True,
                                              num_nodes=len(to_keep))
 
-            node_type_idx_filtered = node_type_idx[to_keep] - 1  # 去掉H后整体左移
+            node_type_idx_filtered = node_type_idx[to_keep] - 1  # Shift after removing hydrogen
             x = F.one_hot(
                 node_type_idx_filtered,
                 num_classes=len(types_remove_h) + len(self.ring_types)
             ).float()
 
-            # 与官方一致的排序
+            # Sort edges the same way as the official implementation
             N = x.size(0)
             if edge_index.numel() > 0:
                 perm = (edge_index[0] * N + edge_index[1]).argsort()
@@ -453,9 +452,9 @@ class QM9Dataset(InMemoryDataset):
 
             y = torch.zeros((1, 0), dtype=torch.float)
             data = Data(x=x, edge_index=edge_index, edge_attr=edge_attr, y=y, idx=i)
-            # 保存原始 SMILES（压缩前）
+            # Store the original SMILES (before compression)
             data.smiles = original_smiles
-            # 计算并存储分子质量：基础原子权重 + 超点权重
+            # Compute and store molecular mass: base atoms + supernodes
             try:
                 base_weights = [12, 14, 16, 19]
                 ring_weights = list(self.ring_weights) if hasattr(self, 'ring_weights') else [1] * len(self.ring_types)
@@ -475,10 +474,10 @@ class QM9DataModule(MolecularDataModule):
     def __init__(self, cfg):
         self.datadir = cfg.dataset.datadir
         
-        # 强制设定remove_h=True
+        # Always enforce remove_h=True
         self.remove_h = True
         
-        # 从config读取ring_types和ring_weights
+        # Read ring configuration from the config
         self.ring_types = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'C1CNC1'])
         self.ring_weights = getattr(cfg.dataset, 'ring_weights', [48, 36, 50])
 
@@ -504,67 +503,67 @@ class QM9DataModule(MolecularDataModule):
                     'test': QM9Dataset(stage='test', root=root_path, remove_h=True,
                                        target_prop=target, transform=transform,
                                        ring_types=self.ring_types, ring_weights=self.ring_weights)}
-        # 供QM9infos访问统计用样本
+        # Expose datasets so QM9infos can reuse them for statistics
         self.datasets = datasets
         super().__init__(cfg, datasets)
 
 
 class QM9infos(AbstractDatasetInfos):
     def __init__(self, datamodule, cfg):
-        # 强制设定remove_h=True
+        # Always enforce remove_h=True
         self.remove_h = True
         self.need_to_strip = False        # to indicate whether we need to ignore one output from the model
 
         self.name = 'qm9'
         
-        # 从config读取ring_types和ring_weights
+        # Read ring configuration from the config
         self.ring_types_list = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'C1CNC1'])
         self.ring_weights_list = getattr(cfg.dataset, 'ring_weights', [48, 36, 50])
         
-        # 确保长度一致
-        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types和ring_weights长度必须一致"
+        # Ensure matching lengths
+        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types and ring_weights must have identical lengths"
         
-        # 基础原子类型（无H）
-        self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
+        # Base atom types (without hydrogen)
+            self.atom_encoder = {'C': 0, 'N': 1, 'O': 2, 'F': 3}
         base_atom_decoder = ['C', 'N', 'O', 'F']
         base_valencies = [4, 3, 2, 1]
         base_atom_weights = {0: 12, 1: 14, 2: 16, 3: 19}
         base_num_atom_types = 4
         
-        # 添加超点类型
+        # Append supernode types
         self.atom_decoder = base_atom_decoder + [f"RING_{i}" for i in range(len(self.ring_types_list))]
         self.num_atom_types = base_num_atom_types + len(self.ring_types_list)
         
-        # 扩展valencies（超点的valency都是1）
+        # Extend valencies (supernodes have valency 1)
         self.valencies = base_valencies + [1] * len(self.ring_types_list)
         
-        # 扩展atom_weights
+        # Extend atom weights
         self.atom_weights = base_atom_weights.copy()
         for i, weight in enumerate(self.ring_weights_list):
             self.atom_weights[base_num_atom_types + i] = weight
         
-        # 动态生成label_to_ring映射
+        # Build the label_to_ring mapping
         self.label_to_ring = {}
-        base_label = 4  # 与去掉H后左移1位的编码对齐：原子0..3，超点从4开始
+        base_label = 4  # After removing H, atoms occupy 0..3 so rings start at 4
         for i, ring_smiles in enumerate(self.ring_types_list):
             self.label_to_ring[base_label + i] = ring_smiles
         
-        # 固定映射
-        self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
-        self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
+        # Fixed symbol/bond mappings
+                self.label_to_symbol = {0: "C", 1: "N", 2: "O", 3: "F"}
+                self.label_to_bondtype = {1: rdchem.BondType.SINGLE, 2: rdchem.BondType.DOUBLE, 3: rdchem.BondType.TRIPLE, 4: rdchem.BondType.AROMATIC}
 
-        # 从config读取统计信息文件路径
+        # Path to cached statistics
         self.statistics_file = getattr(cfg.dataset, 'statistics_after_4', 'data/qm9/qm9_pyg/statistics_after_compression.json')
         
         if not self._load_statistics():
-            print("统计信息文件不存在或内容不充足，开始重新计算...")
+            print("Statistics file missing or incomplete, recomputing...")
             self._compute_and_save_statistics(datamodule)
 
-        # 如果从文件加载成功或重新计算后，仍缺少 valency_distribution，则重新计算一次
+        # Recompute valency_distribution if it is still missing after loading
         if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
-            print("计算 valency_distribution...")
+            print("Computing valency_distribution...")
             self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
-            # 更新统计文件
+            # Update the statistics file
             try:
                 import json
                 with open(self.statistics_file, 'r') as f:
@@ -573,12 +572,12 @@ class QM9infos(AbstractDatasetInfos):
                 with open(self.statistics_file, 'w') as f:
                     json.dump(stats, f, indent=2)
             except Exception as e:
-                print(f"更新统计文件失败: {e}")
+                print(f"Failed to update statistics file: {e}")
 
             super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
             
     def _load_statistics(self):
-        """尝试从文件加载统计信息"""
+        """Attempt to load statistics from disk."""
         import json
         
         if not os.path.exists(self.statistics_file):
@@ -588,58 +587,58 @@ class QM9infos(AbstractDatasetInfos):
             with open(self.statistics_file, 'r') as f:
                 stats = json.load(f)
             
-            # 检查必需的统计信息是否存在
+            # Ensure all required keys are present
             required_keys = ['max_n_nodes', 'max_weight', 'n_nodes', 'node_types', 'edge_types']
             if not all(key in stats for key in required_keys):
-                print(f"统计信息文件缺少必需的键: {required_keys}")
+                print(f"Statistics file missing required keys: {required_keys}")
                 return False
             
-            # 检查统计信息是否与当前配置匹配
-            expected_num_node_types = 4 + len(self.ring_types_list)  # 基础4个 + 超点数量
+            # Ensure the statistics match the current configuration
+            expected_num_node_types = 4 + len(self.ring_types_list)  # base atoms + supernodes
             if len(stats['node_types']) != expected_num_node_types:
-                print(f"节点类型数量不匹配: 期望{expected_num_node_types}, 实际{len(stats['node_types'])}")
+                print(f"Node type count mismatch: expected {expected_num_node_types}, got {len(stats['node_types'])}")
                 return False
             
-            # 加载统计信息
+            # Load statistics into memory
             self.max_n_nodes = stats['max_n_nodes']
             self.max_weight = stats['max_weight']
             self.n_nodes = torch.tensor(stats['n_nodes'])
             self.node_types = torch.tensor(stats['node_types'])
             self.edge_types = torch.tensor(stats['edge_types'])
             
-            # 如果文件中有 valency_distribution 就加载，否则稍后计算
+            # Load valency_distribution if present, otherwise compute later
             if 'valency_distribution' in stats:
                 self.valency_distribution = torch.tensor(stats['valency_distribution'])
             else:
-                # 如果没有保存，设置为 None，稍后在 _compute_and_save_statistics 中计算
+                # Mark as missing so it can be recomputed
                 self.valency_distribution = None
             
-            print(f"成功从 {self.statistics_file} 加载统计信息")
+            print(f"Loaded statistics from {self.statistics_file}")
             return True
             
         except Exception as e:
-            print(f"加载统计信息失败: {e}")
+            print(f"Failed to load statistics: {e}")
             return False
     
     def _compute_and_save_statistics(self, datamodule):
-        """计算并保存统计信息"""
+        """Compute and save dataset statistics."""
         import json
         
-        print("开始计算环压缩后的数据集统计信息...")
+        print("Computing statistics for the ring-compressed dataset...")
         
-        # 计算统计信息
+        # Aggregate statistics
         self.n_nodes = datamodule.node_counts()
         self.node_types = datamodule.node_types()
         self.edge_types = datamodule.edge_counts()
             
-        # 计算最大节点数和最大质量
+        # Determine maximum node count and molecular weight
         self.max_n_nodes = len(self.n_nodes) - 1
         
-        # 计算 valency_distribution（如果还没有计算）
+        # Compute valency_distribution if necessary
         if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
             self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
             
-        # 基于实际数据观测最大分子质量；若无法遍历数据则退回上界估计
+        # Observe the maximum molecular weight; fall back to an upper bound if necessary
         observed_max_weight = 0.0
         datasets = getattr(datamodule, 'datasets', {})
         if isinstance(datasets, dict):
@@ -655,11 +654,11 @@ class QM9infos(AbstractDatasetInfos):
                         d = ds[i]
                     except Exception:
                         continue
-                    # 优先使用已计算的mol_weight
+                    # Prefer previously computed mol_weight
                     if hasattr(d, 'mol_weight') and d.mol_weight is not None:
                         total_mass = float(d.mol_weight.item())
                     else:
-                        # 回退：从x统计
+                        # Fallback: derive weight from x
                         type_counts = d.x.sum(dim=0)
                         total_mass = 0.0
                         for idx_w, cnt in enumerate(type_counts.tolist()):
@@ -672,11 +671,11 @@ class QM9infos(AbstractDatasetInfos):
         if observed_max_weight > 0:
             self.max_weight = observed_max_weight
         else:
-            # 回退：上界估计（不精确，仅作兜底）
+            # Fallback: loose upper bound
             self.max_weight = max(self.atom_weights.values()) * self.max_n_nodes
         
-        # 保存统计信息
-        # 将 ListConfig 转换为普通列表以确保 JSON 序列化
+        # Persist statistics
+        # Convert ListConfig to plain lists for JSON serialization
         try:
             ring_types_list = OmegaConf.to_container(self.ring_types_list, resolve=True)
         except (TypeError, AttributeError):
@@ -700,16 +699,16 @@ class QM9infos(AbstractDatasetInfos):
             'label_to_ring': self.label_to_ring
         }
         
-        # 确保目录存在
+        # Ensure directory exists
         os.makedirs(os.path.dirname(self.statistics_file), exist_ok=True)
         
         with open(self.statistics_file, 'w') as f:
             json.dump(stats, f, indent=2)
         
-        print(f"统计信息已保存到 {self.statistics_file}")
-        print(f"节点数分布: {self.n_nodes}")
-        print(f"节点类型分布: {self.node_types}")
-        print(f"边类型分布: {self.edge_types}")
+        print(f"Saved statistics to {self.statistics_file}")
+        print(f"Node-count distribution: {self.n_nodes}")
+        print(f"Node-type distribution: {self.node_types}")
+        print(f"Edge-type distribution: {self.edge_types}")
 
 
 def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=False):
@@ -836,7 +835,7 @@ def compute_qm9_smiles(atom_decoder, train_dataloader, remove_h):
     '''
     print(f"\tConverting QM9 dataset to SMILES for remove_h={remove_h}...")
 
-    # 直接从 dataset 读取，而不是从 dataloader（避免批处理问题）
+    # Read directly from the dataset instead of the dataloader to avoid batching issues
     dataset = train_dataloader.dataset
     mols_smiles = []
     len_train = len(dataset)
@@ -844,18 +843,17 @@ def compute_qm9_smiles(atom_decoder, train_dataloader, remove_h):
     
     for i in range(len_train):
         data = dataset[i]
-        # 直接从 data 对象中读取保存的原始 SMILES（在压缩前保存的）
+        # Pull the original SMILES stored on each data instance (captured before compression)
         if hasattr(data, 'smiles') and data.smiles is not None:
             if isinstance(data.smiles, str):
                 mols_smiles.append(data.smiles)
             else:
                 invalid += 1
         else:
-            # 如果没有保存的 SMILES，回退到原来的方法（解压缩）
-            # 但这种情况不应该发生，因为我们在 process() 中已经保存了
+            # If a sample is missing SMILES, fall back to decompression (should not happen)
             print(f"Warning: data at index {i} does not have smiles attribute, falling back to decompression")
-            # 这里需要解压缩逻辑，但为了简化，我们跳过这个样本
-            invalid += 1
+            # Decompression would be required here; skip the sample for now
+                invalid += 1
 
         if i % 1000 == 0:
             print("\tConverting QM9 dataset to SMILES {0:.2%}".format(float(i) / len_train))

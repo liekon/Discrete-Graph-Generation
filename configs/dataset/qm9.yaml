@@ -1,5 +1,12 @@
 name: 'qm9'            # qm9, qm9_positional
-datadir: 'data/qm9/qm9_pyg/'
+datadir: 'data/qm9/'
 remove_h: True
 random_subset: null
 pin_memory: False
+
+# Ring compression configuration
+ring_types: ['C1CCC1', 'C1CC1', 'N1CCC1']  # User-specified ring SMILES
+ring_weights: [56, 42, 57]  # Corresponding ring masses
+
+# Statistics file path after ring compression
+statistics_after_4: 'data/qm9/statistics_after_compression.json'

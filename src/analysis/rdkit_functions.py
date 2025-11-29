@@ -4,7 +4,7 @@ import re
 import wandb
 try:
     from rdkit import Chem, RDLogger
-    # 禁用 RDKit 的警告输出
+    # Suppress RDKit warnings
     RDLogger.DisableLog('rdApp.*')
     print("Found rdkit, all good")
 except ModuleNotFoundError as e:

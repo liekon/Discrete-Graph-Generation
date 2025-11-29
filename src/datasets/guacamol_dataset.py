@@ -73,7 +73,7 @@ class GuacamolDataset(InMemoryDataset):
         if ring_weights is None:
             ring_weights = [56, 42, 57]
         self.ring_weights = ring_weights
-        assert len(ring_types) == len(ring_weights), "ring_types和ring_weights长度必须一致"
+        assert len(ring_types) == len(ring_weights), "ring_types and ring_weights must have identical lengths"
         base_label = len(self.atom_decoder)
         self.ring_types = []
         for i, (smi, weight) in enumerate(zip(ring_types, ring_weights)):
@@ -326,7 +326,7 @@ class GuacamolDataset(InMemoryDataset):
                         except Chem.rdchem.KekulizeException:
                             print("Can't kekulize molecule")
                 else:
-                    # 启用环压缩后，无法在RDKit中重建RING_*原子，因此直接保留原始样本
+                    # With ring compression enabled, RDKit cannot rebuild RING_* atoms, so keep the original sample
                     data_list.append(data)
                     smiles_kept.append(original_smiles)
             else:
@@ -374,7 +374,7 @@ class Guacamolinfos(AbstractDatasetInfos):
 
         self.ring_types_list = getattr(cfg.dataset, 'ring_types', ['C1CCC1', 'C1CC1', 'N1CCC1'])
         self.ring_weights_list = getattr(cfg.dataset, 'ring_weights', [56, 42, 57])
-        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types和ring_weights长度必须一致"
+        assert len(self.ring_types_list) == len(self.ring_weights_list), "ring_types and ring_weights must have identical lengths"
 
         base_atom_decoder = ['C', 'N', 'O', 'F', 'B', 'Br', 'Cl', 'I', 'P', 'S', 'Se', 'Si']
         self.atom_encoder = {atom: i for i, atom in enumerate(base_atom_decoder)}
@@ -401,11 +401,11 @@ class Guacamolinfos(AbstractDatasetInfos):
                                        'data/guacamol/guacamol_pyg/statistics_after_compression.json')
 
         if not self._load_statistics():
-            print("统计信息文件不存在或内容不充足，开始重新计算...")
+            print("Statistics file missing or incomplete, recomputing...")
             self._compute_and_save_statistics(datamodule)
 
         if not hasattr(self, 'valency_distribution') or self.valency_distribution is None:
-            print("计算 valency_distribution...")
+            print("Computing valency_distribution...")
             self.valency_distribution = datamodule.valency_count(self.max_n_nodes)
             try:
                 with open(self.statistics_file, 'r') as f:
@@ -414,7 +414,7 @@ class Guacamolinfos(AbstractDatasetInfos):
                 with open(self.statistics_file, 'w') as f:
                     json.dump(stats, f, indent=2)
             except Exception as e:
-                print(f"更新统计文件失败: {e}")
+                print(f"Failed to update statistics file: {e}")
 
         super().complete_infos(n_nodes=self.n_nodes, node_types=self.node_types)
 
@@ -426,11 +426,11 @@ class Guacamolinfos(AbstractDatasetInfos):
                 stats = json.load(f)
             required_keys = ['max_n_nodes', 'max_weight', 'n_nodes', 'node_types', 'edge_types']
             if not all(key in stats for key in required_keys):
-                print(f"统计信息文件缺少必需的键: {required_keys}")
+                print(f"Statistics file missing required keys: {required_keys}")
                 return False
             expected_num_node_types = len(self.atom_decoder)
             if len(stats['node_types']) != expected_num_node_types:
-                print(f"节点类型数量不匹配: 期望{expected_num_node_types}, 实际{len(stats['node_types'])}")
+                print(f"Node type count mismatch: expected {expected_num_node_types}, got {len(stats['node_types'])}")
                 return False
             self.max_n_nodes = stats['max_n_nodes']
             self.max_weight = stats['max_weight']
@@ -441,14 +441,14 @@ class Guacamolinfos(AbstractDatasetInfos):
                 self.valency_distribution = torch.tensor(stats['valency_distribution'])
             else:
                 self.valency_distribution = None
-            print(f"成功从 {self.statistics_file} 加载统计信息")
+            print(f"Loaded statistics from {self.statistics_file}")
             return True
         except Exception as e:
-            print(f"加载统计信息失败: {e}")
+            print(f"Failed to load statistics: {e}")
             return False
 
     def _compute_and_save_statistics(self, datamodule):
-        print("开始计算环压缩后的数据集统计信息...")
+        print("Computing statistics for the ring-compressed dataset...")
         self.n_nodes = datamodule.node_counts()
         self.node_types = datamodule.node_types()
         self.edge_types = datamodule.edge_counts()
@@ -482,7 +482,7 @@ class Guacamolinfos(AbstractDatasetInfos):
             max_ring_weight = max(self.ring_weights_list) if self.ring_weights_list else 100
             estimated_max = self.max_n_nodes * max(self.atom_weights.values()) + max_ring_weight * 10
             self.max_weight = estimated_max
-            print(f"无法从数据中获取最大质量，使用估计值: {self.max_weight}")
+            print(f"Could not observe max weight directly; using upper bound {self.max_weight}")
 
         stats = {
             'max_n_nodes': int(self.max_n_nodes),
@@ -498,8 +498,8 @@ class Guacamolinfos(AbstractDatasetInfos):
         os.makedirs(os.path.dirname(self.statistics_file), exist_ok=True)
         with open(self.statistics_file, 'w') as f:
             json.dump(stats, f, indent=2)
-        print(f"统计信息已保存到 {self.statistics_file}")
-        print(f"最大节点数: {self.max_n_nodes}, 最大分子质量: {self.max_weight}")
+        print(f"Saved statistics to {self.statistics_file}")
+        print(f"Max nodes: {self.max_n_nodes}, max weight: {self.max_weight}")
 
 
 def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=False):
@@ -512,19 +512,19 @@ def get_train_smiles(cfg, train_dataloader, dataset_infos, evaluate_dataset=Fals
                 train_smiles.append(data.smiles)
 
     if len(train_smiles) == 0:
-        print("警告: 无法从数据集中获取SMILES，尝试从文件读取...")
+        print("Warning: could not gather SMILES from the dataset, falling back to file input...")
         base_path = pathlib.Path(os.path.realpath(__file__)).parents[2]
         smiles_path = os.path.join(base_path, cfg.dataset.datadir, 'guacamol_v1_train.smiles')
         if os.path.exists(smiles_path):
             with open(smiles_path, 'r') as f:
                 train_smiles = [line.strip() for line in f if line.strip()]
-            print(f"从文件读取了 {len(train_smiles)} 个SMILES")
+            print(f"Loaded {len(train_smiles)} SMILES from file")
         else:
-            print("无法找到SMILES文件")
+            print("SMILES file not found")
             return None
 
     train_smiles = [s.strip() if isinstance(s, str) else str(s) for s in train_smiles]
-    print(f"获取了 {len(train_smiles)} 个训练集SMILES")
+    print(f"Collected {len(train_smiles)} training SMILES")
 
     if evaluate_dataset:
         all_molecules = []

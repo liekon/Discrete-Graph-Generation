@@ -1,5 +1,5 @@
 # Training settings
-n_epochs: 1000
+n_epochs: 500
 batch_size: 512
 lr: 0.0002
 clip_grad: null          # float, null to disable

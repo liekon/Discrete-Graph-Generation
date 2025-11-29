@@ -459,7 +459,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             if btype > 0:
                 external_neighbors.append(j)
 
-        # 根据该超点的标签决定具体环
+        # Determine the exact ring based on the supernode label
         ring_labels, ringE = self.parse_ring_smi(ring_smi)  # labels in [0..3], ringE in [r,r] with 1..4
         ring_size = len(ring_labels)
         if ring_size == 0:
@@ -483,32 +483,32 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         newE[offset:offset+ring_size, offset:offset+ring_size] = ringE
 
         if len(external_neighbors) > 0:
-            # 仅允许连接到环内的碳原子；若环内无碳，则不连外部
+            # Only allow connections to carbon atoms inside the ring; skip if none exist
             carbon_rel_indices = [k for k, lbl in enumerate(ring_labels) if lbl == 0]
             if len(carbon_rel_indices) > 0:
-                # 先进行一次随机打乱的不重复分配，超过后允许重复
+                # First do a shuffled unique assignment; allow repeats afterwards
                 shuffled = carbon_rel_indices[:]
                 random.shuffle(shuffled)
                 c_count = len(shuffled)
                 for idx_enb, enb in enumerate(external_neighbors):
-                    real_j = keep_idx.index(enb)
+                real_j = keep_idx.index(enb)
                     if idx_enb < c_count:
                         rel_c = shuffled[idx_enb]
                     else:
                         rel_c = random.choice(carbon_rel_indices)
                     ringC_idx = offset + rel_c
-                    # 外部连边统一单键
+                    # External bonds are always single bonds
                     newE[real_j, ringC_idx] = 1
                     newE[ringC_idx, real_j] = 1
 
         return newX, newE, new_n
 
     def _sample_ring_smiles(self, ring_types):
-        # 如果ring_types是集合，直接随机选择
+        # If ring_types is a set, sample uniformly
         if isinstance(ring_types, set):
             return random.choice(list(ring_types))
         
-        # 如果ring_types是字典，按权重采样
+        # If ring_types is a dict, sample according to weights
         keys = list(ring_types.keys())
         vals = list(ring_types.values())
         s = sum(vals)
@@ -521,19 +521,19 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         return keys[-1]
 
     def _parse_ring_smiles(self, ring_smi):
-        # 使用数据集信息中的原子编码器
+        # Use the dataset-specific atom encoder when available
         if hasattr(self.dataset_info, 'atom_encoder'):
             label_map = self.dataset_info.atom_encoder
         else:
-            # 默认QM9原子类型映射
-            label_map = {'C':0, 'N':1, 'O':2, 'F':3}
+            # Default QM9 atom mapping
+        label_map = {'C':0, 'N':1, 'O':2, 'F':3}
         
         arr = []
         for ch in ring_smi:
             if ch in label_map:
                 arr.append(label_map[ch])
         if len(arr) == 0:
-            arr = [0]  # 默认为碳原子
+            arr = [0]  # Default to carbon
         return arr
 
     def convert_feature_with_supernode(self, X, E, n_nodes):
@@ -558,7 +558,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             converted_X.append(atom_types) 
             converted_E.append(edge_types)  
 
-        # 在所有分子处理完成后进行padding
+        # Pad features after processing all molecules
             padded_X, padded_E = self.pad_features(converted_X, converted_E)
 
         return molecule_list, padded_X, padded_E
@@ -599,7 +599,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
      
         from rdkit import Chem, RDLogger
         from rdkit.Chem import RWMol
-        # 禁用 RDKit 的警告输出
+        # Suppress RDKit warnings
         RDLogger.DisableLog('rdApp.*')
         
         if n_nodes==0:
@@ -752,25 +752,25 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             for ii, at_lbl in enumerate(r_nodes):
                 if at_lbl==0:  # 0=>C
                     ringC_list.append(ring_new_indices[ii])
-            # 若环内无碳原子，则不与外部相连
+            # If no carbon atoms exist inside the ring, skip external connections
             if len(ringC_list)==0:
                 ringC_list = []
                
             
             c_count = len(ringC_list)
             if c_count > 0:
-                # 先不重复随机分配，再允许重复
+                # First assign without repetition, then allow repeats
                 shuffled = ringC_list[:]
                 random.shuffle(shuffled)
                 for idx_e, (oth, _) in enumerate(ext_edges):
-                    new_oth = old2new[oth]
+                new_oth = old2new[oth]
                     if new_oth < 0:
-                        continue
+                    continue
                     if idx_e < c_count:
                         targetC = shuffled[idx_e]
                     else:
                         targetC = random.choice(ringC_list)
-                    # 外部连边统一单键
+                    # External bonds are always single
                     node_info[targetC]['adj'][new_oth]= 1
                     node_info[new_oth]['adj'][targetC]= 1
         
@@ -844,7 +844,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
             molecule_list.append([at, ed])
         try:
             from rdkit import Chem, RDLogger
-            # 禁用 RDKit 的警告输出
+            # Suppress RDKit warnings
             RDLogger.DisableLog('rdApp.*')
             
             def _is_valid_smiles(s):
@@ -935,7 +935,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         max_node_steps = valid_nodes_per_graph.max().item() 
 
         times = 2
-        t_nodes = (times * valid_nodes_per_graph).clone()  #  t_nodes 为 2*n
+        t_nodes = (times * valid_nodes_per_graph).clone()  # t_nodes equals 2*n
         valid_nodes = valid_nodes_per_graph.clone()  
         edge_noise_ratio = 0.2
         valid_edges = (valid_nodes * (valid_nodes - 1)) // 2 + 1e-8
@@ -984,7 +984,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         sampled = sampled.mask(node_mask, collapse=True)
         X, E, y = sampled.X, sampled.E, sampled.y
 
-        # 恢复超点还原功能
+        # Re-enable supernode restoration
         molecule_list, X, E = self.convert_feature_with_supernode(X, E, n_nodes)
 
         chain_X_size = torch.Size((number_chain_steps + 1, keep_chain, X.size(1)))
@@ -1012,7 +1012,7 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
         if self.visualization_tools is not None:
             self.print('Visualizing chains...')
             current_path = os.getcwd()
-            # 获取可视化目录，如果没有配置则使用当前目录
+            # Use configured visualization directory or fallback to CWD
             vis_dir = getattr(self.cfg.general, 'visualization_dir', None)
             if vis_dir is None:
                 vis_dir = os.getcwd()
@@ -1022,9 +1022,9 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 result_path = os.path.join(vis_dir, f'chains/{self.cfg.general.name}/'
                                                         f'epoch{self.current_epoch}/'
                                                         f'chains/molecule_{batch_id + i}')
-                # 使用 exist_ok=True 避免多进程创建目录时的竞态条件
+                # Use exist_ok=True to avoid race conditions in multi-process runs
                 os.makedirs(result_path, exist_ok=True)
-                # 只在主进程（local_rank == 0）时进行可视化，避免多进程同时写入
+                # Only visualize on rank 0 to avoid concurrent writes
                 if getattr(self, 'local_rank', 0) == 0:
                     _ = self.visualization_tools.visualize_chain(result_path,
                                                                 chain_X[:, i, :].cpu().numpy(),
@@ -1032,19 +1032,19 @@ class DiscreteDenoisingDiffusion(pl.LightningModule):
                 self.print('\r{}/{} complete'.format(i+1, num_molecules), end='', flush=True)
             self.print('\nVisualizing molecules...')
 
-            # 获取可视化目录，如果没有配置则使用当前目录
+            # Use configured visualization directory or fallback to CWD
             vis_dir = getattr(self.cfg.general, 'visualization_dir', None)
             if vis_dir is None:
                 vis_dir = os.getcwd()
            
             result_path = os.path.join(vis_dir,
                                     f'graphs/{self.name}/epoch{self.current_epoch}_b{batch_id}/')
-            # 使用 exist_ok=True 避免多进程创建目录时的竞态条件
+            # Use exist_ok=True to avoid race conditions in multi-process runs
             os.makedirs(result_path, exist_ok=True)
-            # 只在主进程（local_rank == 0）时进行可视化，避免多进程同时写入
+            # Only visualize on rank 0 to avoid concurrent writes
             if getattr(self, 'local_rank', 0) == 0:
-                self.visualization_tools.visualize(result_path, molecule_list, save_final)
-                self.print("Done.")
+            self.visualization_tools.visualize(result_path, molecule_list, save_final)
+            self.print("Done.")
 
         return molecule_list
 

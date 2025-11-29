@@ -1,4 +1,11 @@
 name: 'moses'
-datadir: 'data/moses/moses_pyg/'                 # Relative to the moses_dataset.py file
+datadir: 'data/moses/'                 # Relative to the moses_dataset.py file
 remove_h: null
 filter: False
+
+# Ring compression configuration (same as QM9)
+ring_types: ['C1CCC1', 'C1CC1', 'N1CCC1']  # User-specified ring SMILES
+ring_weights: [56, 42, 57]  # Corresponding ring masses
+
+# Statistics file path after ring compression
+statistics_after_4: 'data/moses/statistics_after_compression.json'

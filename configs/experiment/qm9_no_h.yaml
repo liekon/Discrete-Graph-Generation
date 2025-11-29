@@ -2,9 +2,10 @@
 general:
     name : 'qm9_no_h'
     gpus : 1
-    wandb: 'online'
+    wandb: 'disabled'
     test_only: null
     evaluate_all_checkpoints: False
+    visualization_dir: 'results/'
 train:
     n_epochs: 1000
     batch_size: 1024

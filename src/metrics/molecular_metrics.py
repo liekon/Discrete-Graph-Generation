@@ -152,7 +152,7 @@ class SamplingMolecularMetrics(nn.Module):
             print("Custom metrics computed.")
         if local_rank == 0:
             valid_unique_molecules = rdkit_metrics[1]
-            # 获取可视化目录，如果没有配置则使用当前目录
+            # Use configured visualization directory or fallback to CWD
             import os
             vis_dir = None
             if self.cfg is not None:
